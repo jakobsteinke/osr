@@ -19,6 +19,7 @@
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
 #include "osr/routing/dijkstra.h"
+#include "osr/routing/bidirectional_dijkstra.h"
 #include "osr/routing/profile.h"
 #include "osr/routing/profiles/car.h"
 #include "osr/routing/route.h"
@@ -65,6 +66,7 @@ void run(ways const& w,
   auto n_empty_matches = std::atomic<unsigned>{0U};
   auto reference_times = std::vector<std::chrono::steady_clock::duration>{};
   auto experiment_times = std::vector<std::chrono::steady_clock::duration>{};
+  auto bidirdijkstra_times = std::vector<std::chrono::steady_clock::duration>{};
 
   auto m = std::mutex{};
 
@@ -111,41 +113,54 @@ void run(ways const& w,
               nullptr, routing_algorithm::kAStarBi);
     auto const experiment_time =
         std::chrono::steady_clock::now() - experiment_start;
+    auto const bidirdijkstra_start = std::chrono::steady_clock::now();
+    auto const bidirdijkstra =
+        route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
+              to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
+              nullptr, routing_algorithm::kBidirDijkstra);
+    auto const bidirdijkstra_time =
+        std::chrono::steady_clock::now() - bidirdijkstra_start;
 
-    if (reference.has_value() != experiment.has_value() ||
-        (reference && experiment &&
-         (reference->cost_ != experiment->cost_ /*||
-          std::abs(reference->dist_ - experiment->dist_) / reference->dist_ >
-              kMaxAllowedPathDifferenceRatio*/))) {
-      auto const print_result = [&](std::string_view name, auto const& p,
-                                    auto const& t) {
-        fmt::println(
-            "{:10}: {:11} --> {:11} | {} | time: "
-            "{}:{:0>3}:{:0>3} s",
-            name, w.node_to_osm_[from_node], w.node_to_osm_[to_node],
-            p ? fmt::format("cost: {:5} | dist: {:>10.2f}", p->cost_, p->dist_)
-              : "no result",
-            std::chrono::duration_cast<std::chrono::seconds>(t).count(),
-            std::chrono::duration_cast<std::chrono::milliseconds>(t).count() %
-                1000,
-            std::chrono::duration_cast<std::chrono::microseconds>(t).count() %
-                1000);
-        if (p.has_value() && kPrintDebugGeojson) {
-          fmt::println("{}\n", to_featurecollection(w, p));
-        }
-      };
 
-      print_result("dijkstra", reference, reference_time);
-      print_result("a* bidir", experiment, experiment_time);
+        if (reference.has_value() != experiment.has_value() ||
+          reference.has_value() != bidirdijkstra.has_value() ||
+          (reference && experiment && bidirdijkstra &&
+          (reference->cost_ != experiment->cost_ ||
+            reference->cost_ != bidirdijkstra->cost_ /*||
+            std::abs(reference->dist_ - experiment->dist_) / reference->dist_ >
+                kMaxAllowedPathDifferenceRatio*/))) {
+        auto const print_result = [&](std::string_view name, auto const& p,
+                                      auto const& t) {
+          fmt::println(
+              "{:14}: {:11} --> {:11} | {} | time: "
+              "{}:{:0>3}:{:0>3} s",
+              name, w.node_to_osm_[from_node], w.node_to_osm_[to_node],
+              p ? fmt::format("cost: {:5} | dist: {:>10.2f}", p->cost_, p->dist_)
+                : "no result",
+              std::chrono::duration_cast<std::chrono::seconds>(t).count(),
+              std::chrono::duration_cast<std::chrono::milliseconds>(t).count() %
+                  1000,
+              std::chrono::duration_cast<std::chrono::microseconds>(t).count() %
+                  1000);
+          if (p.has_value() && kPrintDebugGeojson) {
+            fmt::println("{}\n", to_featurecollection(w, p));
+          }
+        };
 
-    } else {
-      ++n_congruent;
-    }
+        print_result("dijkstra", reference, reference_time);
+        print_result("a* bidir", experiment, experiment_time);
+        print_result("bidir dijkstra", bidirdijkstra, bidirdijkstra_time);
+
+      } else {
+        ++n_congruent;
+      }
+
 
     if (!from_matches.empty() && !to_matches.empty()) {
       auto const guard = std::lock_guard{m};
       reference_times.emplace_back(reference_time);
       experiment_times.emplace_back(experiment_time);
+      bidirdijkstra_times.emplace_back(bidirdijkstra_time);
     }
   };
 
@@ -165,15 +180,22 @@ void run(ways const& w,
                (static_cast<double>(non_empty_congruent) /
                 static_cast<double>(non_empty_samples)) *
                    100);
-  if (non_empty_congruent == non_empty_samples) {
-    fmt::println(
-        "speedup on non-empty: {:.2f}",
-        static_cast<double>(
-            std::reduce(begin(reference_times), end(reference_times)).count()) /
-            static_cast<double>(
-                std::reduce(begin(experiment_times), end(experiment_times))
-                    .count()));
-  }
+    if (non_empty_congruent == non_empty_samples) {
+      fmt::println(
+          "speedup on non-empty (A* bidir): {:.2f}",
+          static_cast<double>(
+              std::reduce(begin(reference_times), end(reference_times)).count()) /
+              static_cast<double>(
+                  std::reduce(begin(experiment_times), end(experiment_times))
+                      .count()));
+      fmt::println(
+          "speedup on non-empty (bidir dijkstra): {:.2f}",
+          static_cast<double>(
+              std::reduce(begin(reference_times), end(reference_times)).count()) /
+              static_cast<double>(
+                  std::reduce(begin(bidirdijkstra_times), end(bidirdijkstra_times))
+                      .count()));
+    }
 }
 
 TEST(dijkstra_astarbidir, monaco) {

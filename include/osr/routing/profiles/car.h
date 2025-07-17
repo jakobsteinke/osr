@@ -83,18 +83,21 @@ struct car {
       return cost_[get_index(n)];
     }
 
-    constexpr bool update(label const&,
+    /*constexpr*/ bool update(label const&,
                           node const n,
                           cost_t const c,
                           node const pred) noexcept {
+      //std::cout << "[DEBUG] update: node=" << n.n_ << " cost=" << c << " pred=" << pred.n_ << std::endl;
       auto const idx = get_index(n);
       if (c < cost_[idx]) {
         cost_[idx] = c;
         pred_[idx] = pred.n_;
         pred_way_[idx] = pred.way_;
         pred_dir_[idx] = to_bool(pred.dir_);
+        //std::cout << "[DEBUG]   updated!" << std::endl;
         return true;
       }
+      //std::cout << "[DEBUG]   not updated." << std::endl;
       return false;
     }
 

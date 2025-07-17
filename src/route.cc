@@ -25,6 +25,15 @@
 #include "osr/routing/sharing_data.h"
 #include "osr/util/infinite.h"
 #include "osr/util/reverse.h"
+#include "osr/routing/bidirectional_dijkstra.h"
+
+#include <iostream>
+
+#define INFO(msg)    std::cout << "[INFO] " << msg << std::endl
+#define WARNING(msg) std::cout << "[WARNING] " << msg << std::endl
+#define DEBUG(msg)   std::cout << "[DEBUG] " << msg << std::endl
+
+
 
 namespace osr {
 
@@ -44,6 +53,7 @@ routing_algorithm to_algorithm(std::string_view s) {
   switch (cista::hash(s)) {
     case cista::hash("dijkstra"): return routing_algorithm::kDijkstra;
     case cista::hash("bidirectional"): return routing_algorithm::kAStarBi;
+    case cista::hash("bidirdijkstra"): return routing_algorithm::kBidirDijkstra; // NEW
   }
   throw utl::fail("unknown routing algorithm: {}", s);
 }
@@ -306,6 +316,123 @@ path reconstruct_bi(ways const& w,
   b.cost2_.at(backward_n.get_key()).write(backward_n, p);
   return p;
 }
+
+template <typename Profile>
+path reconstruct_bi(ways const& w,
+                    lookup const& l,
+                    bitvec<node_idx_t> const* blocked,
+                    sharing_data const* sharing,
+                    elevation_storage const* elevations,
+                    bidirectional_dijkstra<Profile> const& b,
+                    location const& from,
+                    location const& to,
+                    way_candidate const& start,
+                    way_candidate const& dest,
+                    cost_t const cost,
+                    direction const dir) {
+  auto forward_n = b.meet_point_1_;
+
+  auto forward_segments = std::vector<path::segment>{};
+  auto forward_dist = 0.0;
+
+  while (true) {
+    auto const& e = b.cost1_.at(forward_n.get_key());
+    auto const pred = e.pred(forward_n);
+    if (pred.has_value()) {
+      auto const expected_cost = static_cast<cost_t>(
+          e.cost(forward_n) - b.template get_cost<direction::kForward>(*pred));
+      forward_dist +=
+          add_path<Profile>(w, *w.r_, blocked, sharing, elevations, *pred,
+                            forward_n, expected_cost, forward_segments, dir);
+    } else {
+      break;
+    }
+    forward_n = *pred;
+  }
+
+  auto const& start_node_candidate =
+      forward_n.get_node() == start.left_.node_ ? start.left_ : start.right_;
+
+  forward_segments.push_back(
+      {.polyline_ = l.get_node_candidate_path<Profile>(
+           start, start_node_candidate, false, from),
+       .from_level_ = start_node_candidate.lvl_,
+       .to_level_ = start_node_candidate.lvl_,
+       .from_ = dir == direction::kBackward ? forward_n.get_node()
+                                            : node_idx_t::invalid(),
+       .to_ = dir == direction::kForward ? forward_n.get_node()
+                                         : node_idx_t::invalid(),
+
+       .way_ = way_idx_t::invalid(),
+       .cost_ = start_node_candidate.cost_,
+       .dist_ = static_cast<distance_t>(start_node_candidate.dist_to_node_),
+       .mode_ = forward_n.get_mode()});
+
+  auto backward_segments = std::vector<path::segment>{};
+  auto backward_n = b.meet_point_2_;
+  auto backward_dist = 0.0;
+
+  while (true) {
+    auto const& e = b.cost2_.at(backward_n.get_key());
+    auto const pred = e.pred(backward_n);
+    if (pred.has_value()) {
+
+      auto const expected_cost =
+          static_cast<cost_t>(e.cost(backward_n) -
+                              b.template get_cost<direction::kBackward>(*pred));
+      backward_dist += add_path<Profile>(w, *w.r_, blocked, sharing, elevations,
+                                         *pred, backward_n, expected_cost,
+                                         backward_segments, opposite(dir));
+    } else {
+      break;
+    }
+    backward_n = *pred;
+  }
+
+  auto const& dest_node_candidate =
+      backward_n.get_node() == dest.left_.node_ ? dest.left_ : dest.right_;
+
+  backward_segments.push_back(
+      {.polyline_ = l.get_node_candidate_path<Profile>(
+           dest, dest_node_candidate, true, to),
+       .from_level_ = dest_node_candidate.lvl_,
+       .to_level_ = dest_node_candidate.lvl_,
+       .from_ = dir == direction::kForward ? backward_n.get_node()
+                                           : node_idx_t::invalid(),
+       .to_ = dir == direction::kBackward ? backward_n.get_node()
+                                          : node_idx_t::invalid(),
+       .way_ = way_idx_t::invalid(),
+       .cost_ = dest_node_candidate.cost_,
+       .dist_ = static_cast<distance_t>(dest_node_candidate.dist_to_node_),
+       .mode_ = backward_n.get_mode()});
+
+  if (dir == direction::kForward) {
+    std::reverse(forward_segments.begin(), forward_segments.end());
+  } else {
+    std::reverse(backward_segments.begin(), backward_segments.end());
+  }
+  forward_segments.insert(forward_segments.end(), backward_segments.begin(),
+                          backward_segments.end());
+
+  auto total_dist = start_node_candidate.dist_to_node_ + forward_dist +
+                    backward_dist + dest_node_candidate.dist_to_node_;
+
+  auto path_elevation = elevation_storage::elevation{};
+  for (auto const& segment : forward_segments) {
+    path_elevation += segment.elevation_;
+  }
+  auto p = path{.cost_ = cost,
+                .dist_ = total_dist,
+                .elevation_ = path_elevation,
+                .segments_ = forward_segments};
+
+  b.cost2_.at(backward_n.get_key()).write(backward_n, p);
+  //INFO("Path found with cost " << cost << ", total_dist=" << total_dist
+         // << ", segments=" << forward_segments.size());
+
+  return p;
+}
+
 
 template <typename Profile>
 path reconstruct(ways const& w,
@@ -581,6 +708,387 @@ std::optional<path> route_bidirectional(ways const& w,
   }
   return std::nullopt;
 }
+
+/*
+template <typename Profile>
+std::optional<path> route_bidirdijkstra(
+    ways const& w,
+    lookup const& l,
+    bidirectional_dijkstra<Profile>& b,
+    location const& from,
+    location const& to,
+    match_view_t from_match,
+    match_view_t to_match,
+    cost_t const max,
+    direction const dir,
+    bitvec<node_idx_t> const* blocked,
+    sharing_data const* sharing,
+    elevation_storage const* elevations) {
+    INFO("pq1_ size after seeding: " << b.pq1_.size());
+    INFO("pq2_ size after seeding: " << b.pq2_.size());
+
+    INFO("route_bidirdijkstra: from=" << from.pos_ << ", to=" << to.pos_ 
+              << ", max=" << max << ", dir=" << static_cast<int>(dir));
+
+  if (auto const direct = try_direct(from, to); direct.has_value()) {
+    INFO("Direct path found!");
+    return *direct;
+  }
+
+  b.reset(max, from, to);
+  if (b.radius_ == max) {
+    WARNING("Radius reached max: " << max);
+    return std::nullopt;
+  }
+
+  auto const limit_squared_max_matching_distance =
+      std::pow(geo::distance(from.pos_, to.pos_), 2) / 
+      kMaxMatchingDistanceSquaredRatio; // same as dijkstra
+
+  for (auto const [i, start] : utl::enumerate(from_match)) {
+    if (b.max_reached_1_ && component_seen(w, from_match, i)) {
+      continue;
+    }
+    auto const start_way = start.way_;
+    for (auto const* nc : {&start.left_, &start.right_}) {
+      if (nc->valid() && nc->cost_ < max) {
+        Profile::resolve_start_node(
+            *w.r_, start.way_, nc->node_, from.lvl_, dir, [&](auto const node) {
+               INFO("Seeding: node.n_=" << node.n_ << " way_=" << node.way_ 
+               << " dir_=" << static_cast<int>(node.dir_) 
+               << " nc_cost_=" << nc->cost_);
+              auto label = typename Profile::label{node, nc->cost_};
+              label.track(label, *w.r_, start_way, node.get_node(), false);
+              b.add_start(w, label, sharing);
+            });
+            INFO("Seeds: pq1_ size=" << b.pq1_.size() << ", pq2_ size=" << b.pq2_.size());
+      }
+    }
+    if (b.pq1_.empty()) {
+      continue;
+    }
+    for (auto const [j, end] : utl::enumerate(to_match)) {
+      DEBUG("Trying start candidate " << i << ", way=" << start.way_);
+      if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
+        continue;
+      }
+      if (b.max_reached_2_ && component_seen(w, to_match, j)) {
+        continue;
+      }
+      if (std::pow(end.dist_to_way_, 2) > limit_squared_max_matching_distance) {
+        continue; // break
+      }
+      auto const end_way = end.way_;
+      for (auto const* nc : {&end.left_, &end.right_}) {
+        if (nc->valid() && nc->cost_ < max) {
+          Profile::resolve_start_node(
+              *w.r_, end_way, nc->node_, to.lvl_, opposite(dir),
+              [&](auto const node) {
+                auto label = typename Profile::label{node, nc->cost_};
+                label.track(label, *w.r_, end_way, node.get_node(), false);
+                b.add_end(w, label, sharing);
+              });
+              INFO("Seeds: pq1_ size=" << b.pq1_.size() << ", pq2_ size=" << b.pq2_.size());
+        }
+      }
+      if (b.pq2_.empty()) {
+        continue;
+      }
+      auto const should_continue =
+          b.run(w, *w.r_, max, blocked, sharing, elevations, dir);
+
+      if (b.meet_point_1_.get_node() == node_idx_t::invalid()) {
+        if (should_continue) {
+          continue;
+        }
+        return std::nullopt;
+      }
+
+      auto const cost = b.get_cost_to_mp(b.meet_point_1_, b.meet_point_2_);
+
+      return reconstruct_bi(w, l, blocked, sharing, elevations, b, from, to,
+                            start, end, cost, dir);
+    }
+    b.pq1_.clear();
+    b.pq2_.clear();
+    b.cost2_.clear();
+    b.max_reached_2_ = false;
+  }
+  INFO("No path found by bidirdijkstra");
+  return std::nullopt;
+}*/
+
+/*
+template <typename Profile>
+std::optional<path> route_bidirdijkstra(
+    ways const& w,
+    lookup const& l,
+    bidirectional_dijkstra<Profile>& b,
+    location const& from,
+    location const& to,
+    match_view_t from_match,
+    match_view_t to_match,
+    cost_t const max,
+    direction const dir,
+    bitvec<node_idx_t> const* blocked,
+    sharing_data const* sharing,
+    elevation_storage const* elevations) {
+    
+    INFO("==== route_bidirdijkstra called ====");
+    INFO("from_match.size() = " << from_match.size());
+    INFO("to_match.size() = " << to_match.size());
+
+    // Log all matches for from_match
+    for (auto const& start : from_match) {
+        INFO("from_match: way_=" << start.way_
+            << " left.valid=" << start.left_.valid() << " left.cost=" << start.left_.cost_
+            << " right.valid=" << start.right_.valid() << " right.cost=" << start.right_.cost_);
+    }
+    // Log all matches for to_match
+    for (auto const& end : to_match) {
+        INFO("to_match: way_=" << end.way_
+            << " left.valid=" << end.left_.valid() << " left.cost=" << end.left_.cost_
+            << " right.valid=" << end.right_.valid() << " right.cost=" << end.right_.cost_);
+    }
+
+    INFO("pq1_ size after seeding: " << b.pq1_.size());
+    INFO("pq2_ size after seeding: " << b.pq2_.size());
+
+    INFO("route_bidirdijkstra: from=" << from.pos_ << ", to=" << to.pos_ 
+              << ", max=" << max << ", dir=" << static_cast<int>(dir));
+
+    if (auto const direct = try_direct(from, to); direct.has_value()) {
+        INFO("Direct path found!");
+        return *direct;
+    }
+
+    b.reset(max, from, to);
+    if (b.radius_ == max) {
+        WARNING("Radius reached max: " << max);
+        return std::nullopt;
+    }
+
+    auto const limit_squared_max_matching_distance =
+        std::pow(geo::distance(from.pos_, to.pos_), 2) / 
+        kMaxMatchingDistanceSquaredRatio;
+
+    // ======== MAIN SEEDING LOOP STARTS HERE ========
+
+    for (auto const [i, start] : utl::enumerate(from_match)) {
+        INFO("Processing from_match index=" << i << ", way=" << start.way_);
+
+        if (b.max_reached_1_ && component_seen(w, from_match, i)) {
+            INFO("Skipped: b.max_reached_1_ and component_seen at i=" << i);
+            continue;
+        }
+        auto const start_way = start.way_;
+        for (auto const* nc : {&start.left_, &start.right_}) {
+            if (nc->valid() && nc->cost_ < max) {
+                INFO("About to call resolve_start_node for way=" << start.way_ << ", node=" << nc->node_ << ", cost=" << nc->cost_);
+                INFO("Seeding start node: way_=" << start_way 
+                    << " nc->valid=" << nc->valid() << " nc->cost=" << nc->cost_);
+                INFO("Calling Profile::resolve_start_node for way=" << start.way_ << ", node=" << nc->node_ << ", dir=" << int(dir) << ", lvl=" << from.lvl_);
+                // Print node and way
+                INFO("DEBUG: Calling resolve_start_node with way=" << start.way_ << ", node=" << nc->node_);
+
+                // Print all ways for this node:
+                auto node_ways = w.r_->node_ways_[nc->node_];
+                std::stringstream ws;
+                for (auto i = way_pos_t{0U}; i != node_ways.size(); ++i) ws << node_ways[i] << ",";
+                INFO("DEBUG: node_ways for node=" << nc->node_ << " : " << ws.str());
+
+                Profile::resolve_start_node(
+                    *w.r_, start.way_, nc->node_, from.lvl_, dir, [&](auto const node) {
+                        INFO("resolve_start_node callback CALLED for node.n_=" << node.n_);
+                        INFO("resolve_start_node callback for start, node.n_=" << node.n_);
+                        INFO("Seeding: node.n_=" << node.n_ << " way_=" << node.way_ 
+                             << " dir_=" << static_cast<int>(node.dir_) 
+                             << " nc_cost_=" << nc->cost_);
+                        auto label = typename Profile::label{node, nc->cost_};
+                        label.track(label, *w.r_, start_way, node.get_node(), false);
+                        b.add_start(w, label, sharing);
+                        INFO("add_start called: pq1_.size()=" << b.pq1_.size());
+                    });
+                INFO("Returned from Profile::resolve_start_node");
+                INFO("After resolve_start_node: pq1_.size()=" << b.pq1_.size());
+            }
+        }
+        INFO("After all start node seeding for i=" << i << ", pq1_.size()=" << b.pq1_.size());
+        if (b.pq1_.empty()) {
+            INFO("After seeding for start_way=" << start_way << ": pq1_.empty()!");
+            continue;
+        }
+
+        // Now try to seed end nodes (to_match)
+        for (auto const [j, end] : utl::enumerate(to_match)) {
+            DEBUG("Trying start candidate " << i << ", way=" << start.way_);
+            if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
+                INFO("Skipping end candidate j=" << j << ": components don't match.");
+                continue;
+            }
+            if (b.max_reached_2_ && component_seen(w, to_match, j)) {
+                INFO("Skipped: b.max_reached_2_ and component_seen at j=" << j);
+                continue;
+            }
+            if (std::pow(end.dist_to_way_, 2) > limit_squared_max_matching_distance) {
+                INFO("Skipping end candidate j=" << j << ": distance filter.");
+                continue;
+            }
+            auto const end_way = end.way_;
+            for (auto const* nc : {&end.left_, &end.right_}) {
+                INFO("About to call resolve_start_node (end) for way=" << end_way << ", node=" << nc->node_ << ", cost=" << nc->cost_);
+                if (nc->valid() && nc->cost_ < max) {
+                    INFO("Seeding end node: way_=" << end_way 
+                        << " nc->valid=" << nc->valid() << " nc->cost=" << nc->cost_);
+                    INFO("Calling Profile::resolve_start_node for way=" << start.way_ << ", node=" << nc->node_ << ", dir=" << int(dir) << ", lvl=" << from.lvl_);
+                    // Print node and way
+                    INFO("DEBUG: Calling resolve_start_node with way=" << start.way_ << ", node=" << nc->node_);
+
+                    // Print all ways for this node:
+                    auto node_ways = w.r_->node_ways_[nc->node_];
+                    std::stringstream ws;
+                    for (auto i = way_pos_t{0U}; i != node_ways.size(); ++i) ws << node_ways[i] << ",";
+                    INFO("DEBUG: node_ways for node=" << nc->node_ << " : " << ws.str());
+
+                    Profile::resolve_start_node(
+                        *w.r_, end_way, nc->node_, to.lvl_, opposite(dir),
+                        [&](auto const node) {
+                            INFO("resolve_start_node callback CALLED for node.n_=" << node.n_);
+                            INFO("resolve_start_node callback for end, node.n_=" << node.n_);
+                            INFO("Seeding (end): node.n_=" << node.n_ << " way_=" << node.way_ 
+                                 << " dir_=" << static_cast<int>(node.dir_) 
+                                 << " nc_cost_=" << nc->cost_);
+                            auto label = typename Profile::label{node, nc->cost_};
+                            label.track(label, *w.r_, end_way, node.get_node(), false);
+                            b.add_end(w, label, sharing);
+                            INFO("add_end called: pq2_.size()=" << b.pq2_.size());
+                        });
+                    INFO("Returned from Profile::resolve_start_node");
+                    INFO("After resolve_start_node (end): pq2_.size()=" << b.pq2_.size());
+                }
+            }
+            INFO("After all end node seeding for j=" << j << ", pq2_.size()=" << b.pq2_.size());
+            if (b.pq2_.empty()) {
+                INFO("After seeding for end_way=" << end_way << ": pq2_.empty()!");
+                continue;
+            }
+
+            auto const should_continue =
+                b.run(w, *w.r_, max, blocked, sharing, elevations, dir);
+
+            INFO("After b.run: should_continue=" << should_continue 
+                << ", meet_point_1=" << b.meet_point_1_.get_node()
+                << ", pq1_.size()=" << b.pq1_.size()
+                << ", pq2_.size()=" << b.pq2_.size());
+
+            if (b.meet_point_1_.get_node() == node_idx_t::invalid()) {
+                if (should_continue) {
+                    INFO("No meetpoint found, but should_continue is true.");
+                    continue;
+                }
+                INFO("No meetpoint found and should_continue is false. Returning nullopt.");
+                return std::nullopt;
+            }
+
+            auto const cost = b.get_cost_to_mp(b.meet_point_1_, b.meet_point_2_);
+
+            INFO("Path found! Cost = " << cost);
+            return reconstruct_bi(w, l, blocked, sharing, elevations, b, from, to,
+                                start, end, cost, dir);
+        }
+        b.pq1_.clear();
+        b.pq2_.clear();
+        b.cost2_.clear();
+        b.max_reached_2_ = false;
+    }
+    INFO("No path found by bidirdijkstra");
+    return std::nullopt;
+} */
+
+template <typename Profile>
+std::optional<path> route_bidirdijkstra(
+    ways const& w,
+    lookup const& l,
+    bidirectional_dijkstra<Profile>& b,
+    location const& from,
+    location const& to,
+    match_view_t from_match,
+    match_view_t to_match,
+    cost_t const max,
+    direction const dir,
+    bitvec<node_idx_t> const* blocked,
+    sharing_data const* sharing,
+    elevation_storage const* elevations) 
+{
+    if (auto const direct = try_direct(from, to); direct.has_value()) {
+        return *direct;
+    }
+
+    b.reset(max, from, to);
+    if (b.radius_ == max) {
+        return std::nullopt;
+    }
+
+    auto const limit_squared_max_matching_distance =
+        std::pow(geo::distance(from.pos_, to.pos_), 2) / kMaxMatchingDistanceSquaredRatio;
+
+    for (auto const [i, start] : utl::enumerate(from_match)) {
+        if (b.max_reached_1_ && component_seen(w, from_match, i)) continue;
+        auto const start_way = start.way_;
+        for (auto const* nc : {&start.left_, &start.right_}) {
+            if (nc->valid() && nc->cost_ < max) {
+                Profile::resolve_start_node(
+                    *w.r_, start.way_, nc->node_, from.lvl_, dir,
+                    [&](auto const node) {
+                        auto label = typename Profile::label{node, nc->cost_};
+                        label.track(label, *w.r_, start_way, node.get_node(), false);
+                        b.add_start(w, label, sharing);
+                    });
+            }
+        }
+        if (b.pq1_.empty()) continue;
+
+        for (auto const [j, end] : utl::enumerate(to_match)) {
+            if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) continue;
+            if (b.max_reached_2_ && component_seen(w, to_match, j)) continue;
+            if (std::pow(end.dist_to_way_, 2) > limit_squared_max_matching_distance) break;
+            auto const end_way = end.way_;
+            for (auto const* nc : {&end.left_, &end.right_}) {
+                if (nc->valid() && nc->cost_ < max) {
+                    Profile::resolve_start_node(
+                        *w.r_, end_way, nc->node_, to.lvl_, opposite(dir),
+                        [&](auto const node) {
+                            auto label = typename Profile::label{node, nc->cost_};
+                            label.track(label, *w.r_, end_way, node.get_node(), false);
+                            b.add_end(w, label, sharing);
+                        });
+                }
+            }
+            if (b.pq2_.empty()) continue;
+
+            auto const should_continue =
+                b.run(w, *w.r_, max, blocked, sharing, elevations, dir);
+
+            if (b.meet_point_1_.get_node() == node_idx_t::invalid()) {
+                if (should_continue) continue;
+                return std::nullopt;
+            }
+
+            auto const cost = b.get_cost_to_mp(b.meet_point_1_, b.meet_point_2_);
+
+            return reconstruct_bi(w, l, blocked, sharing, elevations, b, from, to,
+                                  start, end, cost, dir);
+        }
+        b.pq1_.clear();
+        b.pq2_.clear();
+        b.cost2_.clear();
+        b.max_reached_2_ = false;
+    }
+    return std::nullopt;
+}
+
+
+
 
 template <typename Profile>
 std::optional<path> route_dijkstra(ways const& w,
@@ -1039,6 +1547,15 @@ std::optional<path> route(ways const& w,
           return run_bidirectional(
               get_bidirectional<car_sharing<track_node_tracking>>());
       }
+    case routing_algorithm::kBidirDijkstra:
+    switch (profile) {
+      case search_profile::kCar:
+        return route_bidirdijkstra(w, l,
+          get_bidirectional_dijkstra<car>(),
+          from, to, from_match, to_match, max, dir, blocked, sharing, elevations);
+      default:
+        throw utl::fail("bidirdijkstra only enabled for car profile");
+    }
       break;
   }
   throw utl::fail("not implemented");
@@ -1084,6 +1601,15 @@ bidirectional<Profile>& get_bidirectional() {
 }
 
 template <typename Profile>
+bidirectional_dijkstra<Profile>& get_bidirectional_dijkstra() {
+  static auto s = boost::thread_specific_ptr<bidirectional_dijkstra<Profile>>{};
+  if (s.get() == nullptr) {
+    s.reset(new bidirectional_dijkstra<Profile>{});
+  }
+  return *s.get();
+}
+
+template <typename Profile>
 dijkstra<Profile>& get_dijkstra() {
   static auto s = boost::thread_specific_ptr<dijkstra<Profile>>{};
   if (s.get() == nullptr) {
@@ -1103,5 +1629,8 @@ get_dijkstra<foot<true, osr::noop_tracking>>();
 
 template dijkstra<foot<false, osr::noop_tracking>>&
 get_dijkstra<foot<false, osr::noop_tracking>>();
+
+template bidirectional_dijkstra<car>& 
+get_bidirectional_dijkstra<car>();
 
 }  // namespace osr

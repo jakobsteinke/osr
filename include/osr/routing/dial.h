@@ -12,10 +12,13 @@ struct dial {
   using dist_t =
       std::decay_t<decltype(std::declval<GetBucketFn>()(std::declval<T>()))>;
 
-  dial() = default;
+  //dial() = default;
+
+  dial() : current_bucket_{0}, size_{0} {}
 
   explicit dial(GetBucketFn get_bucket = GetBucketFn())
-      : get_bucket_(std::forward<GetBucketFn>(get_bucket)) {}
+      //: get_bucket_(std::forward<GetBucketFn>(get_bucket)) {}
+      : get_bucket_(std::forward<GetBucketFn>(get_bucket)), current_bucket_{0}, size_{0} {}
 
   template <typename El>
   void push(El&& el) {

@@ -169,7 +169,8 @@ struct car {
                        bitvec<node_idx_t> const* blocked,
                        sharing_data const*,
                        elevation_storage const*,
-                       Fn&& fn) {
+                       Fn&& fn,
+                       bool use_ch = true) {  // !!!!!!!!!!!!!!!!!!!!!!!!bidir dijkstra works with true -> must be something where it is not set explicitly
     auto way_pos = way_pos_t{0U};
     for (auto const [way, i] :
          utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
@@ -177,6 +178,20 @@ struct car {
                               std::uint16_t const to) {
         // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
         auto const target_node = w.way_nodes_[way][to];
+        // ===== CH LEVEL FILTER =====
+        const auto curr_level = w.node_ch_level_[n.n_];
+        const auto neighbor_level = w.node_ch_level_[target_node];
+        //fmt::println("curr_level: {} -> neighbor_level: {}", curr_level, neighbor_level);
+        //fmt::println("In route/adjacent, addr of w: {}", fmt::ptr(&w));
+        //fmt::println("CH flag: {}", w.contraction_hierarchy_enabled_);
+        if (/*w.contraction_hierarchy_enabled_ w.shortcuts_.empty() */ use_ch) {                           
+          if constexpr (SearchDir == direction::kForward) { // außerhalb? 
+              if (curr_level <= neighbor_level) return;  // Not allowed by CH
+          } else {
+              if (curr_level >= neighbor_level) return;  // Not allowed by CH
+          }
+        }
+        // ==========================
         if constexpr (WithBlocked) {
           if (blocked->test(target_node)) {
             return;
@@ -189,7 +204,13 @@ struct car {
         }
 
         auto const target_way_prop = w.way_properties_[way];
-        if (way_cost(target_way_prop, way_dir, 0U) == kInfeasible) {
+        if (way_cost(target_way_prop, way_dir, 0U) == kInfeasible) { // dijsktra eigene adjacent funciton , wege 
+          // in ways oder separat shortcut array (node -> shortcuts)
+          // seaparater shortcut loop, restrictions schon in shortcut
+          // restrcitions: welche ganz urspürnlichen Kanten wurden ersetzt... u-turns
+          // Rekonstruktion vom Pfad: welche anderen shortcuts/Kanten ersetzt -> rekursiv (vielleicht auch bei reestricitons)
+
+          // ODER komplett neuer Graph (ohne ways, richtigungen...)
           return;
         }
 

@@ -23,6 +23,7 @@ struct car_parking {
 
   static constexpr auto const kSwitchPenalty = cost_t{200U};
   static constexpr auto const kMaxMatchDistance = car::kMaxMatchDistance;
+  static constexpr bool supports_contraction_hierarchies = false;
 
   using key = node_idx_t;
 
@@ -243,7 +244,8 @@ struct car_parking {
                        bitvec<node_idx_t> const* blocked,
                        sharing_data const*,
                        elevation_storage const* elevations,
-                       Fn&& fn) {
+                       Fn&& fn,
+                       bool use_ch = false) {
     static constexpr auto const kFwd = SearchDir == direction::kForward;
     static constexpr auto const kBwd = SearchDir == direction::kBackward;
 

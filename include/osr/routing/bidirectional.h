@@ -30,8 +30,8 @@ struct bidirectional {
   using cost_map = typename ankerl::unordered_dense::map<key, entry, hash>;
 
   constexpr static auto const kDebug = false;
-  constexpr static auto const kDistanceLatDegrees =
-      geo::kEarthRadiusMeters * geo::kPI / 180;
+  constexpr static auto const kDistanceLatDegrees =   //////////
+      geo::kEarthRadiusMeters * geo::kPI / 180;       /////////
   constexpr static auto const kLongestNodeDistance = cost_t{300};
 
   struct get_bucket {
@@ -56,7 +56,7 @@ struct bidirectional {
     clear_mp();
     start_loc_ = start_loc;
     end_loc_ = end_loc;
-    distance_lon_degrees_ = geo::approx_distance_lng_degrees(
+    distance_lon_degrees_ = geo::approx_distance_lng_degrees( //////////////
         std::abs(start_loc_.pos_.lat()) > std::abs(end_loc_.pos_.lat())
             ? start_loc_.pos_
             : end_loc_.pos_);
@@ -67,7 +67,7 @@ struct bidirectional {
                               std::numeric_limits<cost_t>::max()
             ? std::max(static_cast<cost_t>(diameter * 0.5),
                        kLongestNodeDistance)
-            : max;
+            : max;  ///////////
     max_reached_1_ = false;
     max_reached_2_ = false;
   }
@@ -210,10 +210,12 @@ struct bidirectional {
               std::cout << " -> DOMINATED\n";
             }
           }
-        });
+        },
+        false
+      );
 
     auto const evaluate_meetpoint = [&](cost_t cost, cost_t other_cost,
-                                        node meetpoint1, node meetpoint2) {
+                                        node meetpoint1, node meetpoint2) {  // nur auf node_idx gucken ob da getroffen zum testen (weg egal, richtung egal)
       if constexpr (kDebug) {
         std::cout << "  potential MEETPOINT found by start ";
         meetpoint1.print(std::cout, w);
@@ -289,7 +291,9 @@ struct bidirectional {
                   evaluate_meetpoint_with_potential_u_turn_cost(
                       curr_cost, opposite_curr_cost, curr, *opposite_curr);
                 }
-              });
+              }, 
+              false
+            );
         }
       }
     };
@@ -303,7 +307,7 @@ struct bidirectional {
       auto const top_r =
           pq2_.empty() ? get_cost<direction::kBackward>(meet_point_2_)
                        : pq2_.buckets_[pq2_.get_next_bucket()].back().cost();
-      if (top_f + top_r >= best_cost_ + radius_) {
+      if (top_f + top_r >= best_cost_ + radius_) { // top_f >= best_const && top_r >= best_cost
         if (kDebug) {
           std::cout << "stopping criterion met " << top_f << " " << top_r << " "
                     << best_cost_ << " " << radius_ << std::endl;

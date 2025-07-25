@@ -322,7 +322,8 @@ struct car_sharing {
                        bitvec<node_idx_t> const* blocked,
                        sharing_data const* sharing,
                        elevation_storage const* elevations,
-                       Fn&& fn) {
+                       Fn&& fn,
+                       bool use_ch = false) {
     assert(sharing != nullptr);
 
     auto const& handle_additional_edge =

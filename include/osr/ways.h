@@ -149,10 +149,15 @@ static_assert(sizeof(node_properties) == 3);
 struct ways {
   ways(std::filesystem::path, cista::mmap::protection);
 
+  bool contraction_hierarchy_enabled() const {
+    return r_ && r_->contraction_hierarchy_enabled_;
+  }
+
   void add_restriction(std::vector<resolved_restriction>&);
   void compute_big_street_neighbors();
   void connect_ways();
   void build_components();
+  void build_contraction_hierarchy();
 
   std::optional<way_idx_t> find_way(osm_way_idx_t const i) {
     auto const it = std::lower_bound(begin(way_osm_idx_), end(way_osm_idx_), i);
@@ -275,6 +280,20 @@ struct ways {
     vec<pair<node_idx_t, level_bits_t>> multi_level_elevators_;
 
     vec_map<way_idx_t, component_idx_t> way_component_;
+
+    vec_map<node_idx_t, uint32_t> node_ch_level_;  
+
+    struct shortcut {
+      node_idx_t from;
+      node_idx_t to;
+      cost_t cost;
+      node_idx_t middle;
+    };
+
+    vec<shortcut> shortcuts_;  
+    vecvec<node_idx_t, shortcut> outgoing_shortcuts_;
+    vecvec<node_idx_t, shortcut> incoming_shortcuts_;
+    bool contraction_hierarchy_enabled_ = false;   // Abbiege restrcitions, wege merken die das ersetzt 
   };
 
   cista::wrapped<routing> r_;

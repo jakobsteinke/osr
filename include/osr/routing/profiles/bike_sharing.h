@@ -28,6 +28,8 @@ struct bike_sharing {
   // bike -> trailing foot
   static constexpr auto const kEndSwitchPenalty = cost_t{30U};
 
+  static constexpr bool supports_contraction_hierarchies = false;
+
   static constexpr auto const kAdditionalWayProperties =
       way_properties{.is_foot_accessible_ = true,
                      .is_bike_accessible_ = true,
@@ -269,7 +271,8 @@ struct bike_sharing {
                        bitvec<node_idx_t> const* blocked,
                        sharing_data const* sharing,
                        elevation_storage const* elevations,
-                       Fn&& fn) {
+                       Fn&& fn,
+                       bool use_ch = false) {
     assert(sharing != nullptr);
 
     auto const& handle_additional_edge =

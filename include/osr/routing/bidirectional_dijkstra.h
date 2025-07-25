@@ -121,7 +121,7 @@ struct bidirectional_dijkstra {
     }
 
     Profile::template adjacent<SearchDir, WithBlocked>(
-        r, curr, blocked, sharing, elevations,
+        r, curr, blocked, sharing, elevations, 
         [&](node const neighbor, std::uint32_t const cost, distance_t,
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const track) {
@@ -155,7 +155,9 @@ struct bidirectional_dijkstra {
               std::cout << " -> DOMINATED\n";
             }
           }
-        });
+        },
+        true
+      );
 
     // --- Meeting point handling (same as A*, just no heuristic!) ---
     auto const evaluate_meetpoint = [&](cost_t cost, cost_t other_cost,
@@ -223,7 +225,9 @@ struct bidirectional_dijkstra {
                   evaluate_meetpoint_with_potential_u_turn_cost(
                       curr_cost, opposite_curr_cost, curr, *opposite_curr);
                 }
-              });
+              },
+              true
+            );
         }
       }
     };

@@ -30,6 +30,7 @@ template <unsigned int ElevationUpCost,
           unsigned int ElevationExponentThousandth = 2100U>
 struct bike {
   static constexpr auto const kMaxMatchDistance = 100U;
+  static constexpr bool supports_contraction_hierarchies = false;
 
   struct node {
     friend bool operator==(node, node) = default;
@@ -154,7 +155,8 @@ struct bike {
                        bitvec<node_idx_t> const* blocked,
                        sharing_data const*,
                        elevation_storage const* elevations,
-                       Fn&& fn) {
+                       Fn&& fn,
+                       bool use_ch = false) {
     for (auto const [way, i] :
          utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
       auto const expand = [&](direction const way_dir, std::uint16_t const from,

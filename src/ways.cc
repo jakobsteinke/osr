@@ -4,6 +4,12 @@
 
 #include "cista/io.h"
 
+#include <queue>
+#include <unordered_map>
+#include <limits>
+#include <set>
+#include <tuple>
+
 namespace osr {
 
 ways::ways(std::filesystem::path p, cista::mmap::protection const mode)
@@ -23,7 +29,14 @@ ways::ways(std::filesystem::path p, cista::mmap::protection const mode)
       way_names_{mm("way_names.bin")},
       way_has_conditional_access_no_{
           mm_vec<std::uint64_t>(mm("way_has_conditional_access_no"))},
-      way_conditional_access_no_{mm("way_conditional_access_no")} {}
+      way_conditional_access_no_{mm("way_conditional_access_no")} 
+      {
+        /*if (r_->node_ch_level_.size() != n_nodes()) {
+          r_->node_ch_level_.resize(n_nodes(), 0);
+        }*/
+        //auto& r = *r_;
+        //r.node_ch_level_.resize(n_nodes(), -1);
+      }
 
 void ways::build_components() {
   auto q = hash_set<way_idx_t>{};
@@ -261,6 +274,154 @@ cista::wrapped<ways::routing> ways::routing::read(
 
 void ways::routing::write(std::filesystem::path const& p) const {
   return cista::write(p / "routing.bin", *this);
+}
+
+void deduplicate_shortcuts(osr::ways::routing& r) {
+  std::sort(begin(r.shortcuts_), end(r.shortcuts_), [](const auto& a, const auto& b) {
+    return std::tie(a.from, a.to, a.cost, a.middle) < std::tie(b.from, b.to, b.cost, b.middle);
+  });
+  auto last = std::unique(begin(r.shortcuts_), end(r.shortcuts_), [](const auto& a, const auto& b) {
+    return std::tie(a.from, a.to, a.cost, a.middle) == std::tie(b.from, b.to, b.cost, b.middle);
+  });
+  r.shortcuts_.resize(static_cast<unsigned int>(std::distance(begin(r.shortcuts_), last)));
+}
+
+
+// Dijkstra for witness search 
+bool witness_search(
+    const ways::routing& r,
+    node_idx_t v,
+    node_idx_t w,
+    node_idx_t skip_u,
+    cost_t max_cost
+) {
+  // Min-heap: (cost, node)
+  using QEntry = std::pair<cost_t, node_idx_t>;
+  std::priority_queue<QEntry, std::vector<QEntry>, std::greater<>> q;
+  std::unordered_map<node_idx_t, cost_t> dist;
+
+  q.emplace(0, v);
+  dist[v] = 0;
+
+  while (!q.empty()) {
+    auto [cost, u] = q.top();
+    q.pop();
+
+    if (u == w) {
+      // Found path to w with cost <= max_cost
+      return cost <= max_cost;
+    }
+    if (cost > max_cost) continue;
+    // For each neighbor of u
+    for (auto way : r.node_ways_[u]) {
+      for (auto n : r.way_nodes_[way]) {
+        if (n == u || n == skip_u) continue;
+        // Find edge cost u->n (from way_node_dist_)
+        cost_t edge_cost = kInfeasible;
+        // Get the index of u in way_nodes_[way]
+        auto nodes = r.way_nodes_[way];
+        for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
+          if ((nodes[idx] == u && nodes[idx + 1] == n) || (nodes[idx] == n && nodes[idx + 1] == u)) {
+            edge_cost = r.way_node_dist_[way][idx];
+            break;
+          }
+        }
+        if (edge_cost == kInfeasible) continue;
+        cost_t new_cost = cost + edge_cost;
+        if (!dist.count(n) || new_cost < dist[n]) {
+          dist[n] = new_cost;
+          q.emplace(new_cost, n);
+        }
+      }
+    }
+  }
+  return false; // no witness path found
+}
+
+// Build Contraction Hierarchy 
+void ways::build_contraction_hierarchy() {
+  auto& r = *r_;
+  // 1. Initialize CH level for all nodes
+  r.node_ch_level_.resize(n_nodes(), 0);
+  r.contraction_hierarchy_enabled_ = true;
+
+  // 2. Prepare containers for shortcuts
+  r.shortcuts_.clear();
+  r.outgoing_shortcuts_.resize(n_nodes());
+  r.incoming_shortcuts_.resize(n_nodes());
+
+  // 3. For each node u in contraction order (here: node ID order)
+  for (node_idx_t u{0}; u < n_nodes(); ++u) {
+    // (A) Find all neighbors of u
+    std::vector<node_idx_t> neighbors;
+    for (auto way : r.node_ways_[u]) {
+      for (auto n : r.way_nodes_[way]) {
+        if (n != u && std::find(neighbors.begin(), neighbors.end(), n) == neighbors.end())
+          neighbors.push_back(n);
+      }
+    }
+    // (B) For each (v, w) pair, v != w
+    for (auto v : neighbors) {
+      for (auto w : neighbors) {
+        if (v == w) continue;
+        // Get cost v->u
+        cost_t v_to_u = kInfeasible;
+        for (auto way : r.node_ways_[u]) {
+          auto nodes = r.way_nodes_[way];
+          for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
+            if ((nodes[idx] == v && nodes[idx + 1] == u) || (nodes[idx] == u && nodes[idx + 1] == v)) {
+              v_to_u = r.way_node_dist_[way][idx];
+              break;
+            }
+          }
+          if (v_to_u != kInfeasible) break;
+        }
+        // Get cost u->w
+        cost_t u_to_w = kInfeasible;
+        for (auto way : r.node_ways_[u]) {
+          auto nodes = r.way_nodes_[way];
+          for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
+            if ((nodes[idx] == u && nodes[idx + 1] == w) || (nodes[idx] == w && nodes[idx + 1] == u)) {
+              u_to_w = r.way_node_dist_[way][idx];
+              break;
+            }
+          }
+          if (u_to_w != kInfeasible) break;
+        }
+        if (v_to_u == kInfeasible || u_to_w == kInfeasible) continue;
+
+        cost_t shortcut_cost = v_to_u + u_to_w;
+
+        // (C) Witness search: is there a v-w path avoiding u with cost ≤ shortcut_cost?
+        bool witness = witness_search(r, v, w, u, shortcut_cost);
+        if (!witness) {
+          // (D) Add shortcut (store v->w with cost, and middle node=u for unpacking)
+          ways::routing::shortcut sc{v, w, shortcut_cost, u};
+          r.shortcuts_.push_back(sc);
+          r.outgoing_shortcuts_[v].push_back(sc);
+          r.incoming_shortcuts_[w].push_back(sc);
+        }
+      }
+    }
+    // (E) Optionally mark u's level
+    // r.node_ch_level_[u] = 0; // For now, use 0, or compute as needed.
+    // (E) Assign level to u based on neighbors
+    unsigned int max_neighbor_level = 0;
+    for (auto neighbor : neighbors) {
+        max_neighbor_level = std::max(max_neighbor_level, r.node_ch_level_[neighbor]);
+    }
+    r.node_ch_level_[u] = max_neighbor_level + 1;
+
+  }
+  std::set<std::tuple<node_idx_t, node_idx_t, cost_t, node_idx_t>> seen;
+  size_t dupes = 0;
+  for (const auto& sc : r.shortcuts_) {
+      auto key = std::make_tuple(sc.from, sc.to, sc.cost, sc.middle);
+      if (!seen.insert(key).second) ++dupes;
+  }
+  fmt::println("DUPLICATE SHORTCUTS BEFORE DEDUPLICATION: {}", dupes);
+
+  //deduplicate_shortcuts(r);
 }
 
 }  // namespace osr

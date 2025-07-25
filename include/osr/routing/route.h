@@ -117,6 +117,7 @@ std::optional<path> route(ways const& w,
                           bitvec<node_idx_t> const* blocked = nullptr,
                           sharing_data const* sharing = nullptr,
                           elevation_storage const* = nullptr,
-                          routing_algorithm = routing_algorithm::kDijkstra);
+                          routing_algorithm = routing_algorithm::kDijkstra,
+                          bool use_ch = true);
 
 }  // namespace osr

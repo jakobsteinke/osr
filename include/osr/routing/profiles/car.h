@@ -170,7 +170,7 @@ struct car {
                        sharing_data const*,
                        elevation_storage const*,
                        Fn&& fn,
-                       bool use_ch = true) {  // !!!!!!!!!!!!!!!!!!!!!!!!bidir dijkstra works with true -> must be something where it is not set explicitly
+                       bool use_ch = false) { 
     auto way_pos = way_pos_t{0U};
     for (auto const [way, i] :
          utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
@@ -179,16 +179,30 @@ struct car {
         // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
         auto const target_node = w.way_nodes_[way][to];
         // ===== CH LEVEL FILTER =====
-        const auto curr_level = w.node_ch_level_[n.n_];
+        /*const auto curr_level = w.node_ch_level_[n.n_];
         const auto neighbor_level = w.node_ch_level_[target_node];
         //fmt::println("curr_level: {} -> neighbor_level: {}", curr_level, neighbor_level);
         //fmt::println("In route/adjacent, addr of w: {}", fmt::ptr(&w));
         //fmt::println("CH flag: {}", w.contraction_hierarchy_enabled_);
-        if (/*w.contraction_hierarchy_enabled_ w.shortcuts_.empty() */ use_ch) {                           
+        if (/*w.contraction_hierarchy_enabled_ w.shortcuts_.empty() use_ch) {         
           if constexpr (SearchDir == direction::kForward) { // außerhalb? 
-              if (curr_level <= neighbor_level) return;  // Not allowed by CH
+              if (curr_level <= neighbor_level) return;  // Not allowed by CH <=
           } else {
-              if (curr_level >= neighbor_level) return;  // Not allowed by CH
+              if (curr_level >= neighbor_level) return;  // Not allowed by CH >=
+          }
+        }*/
+        // Only filter if CH is really present and requested.
+        // CH pruning: only if caller asked for CH (use_ch == true)
+        if (use_ch) {
+          auto const curr_level     = w.node_ch_level_[n.n_];
+          auto const neighbor_level = w.node_ch_level_[target_node];
+
+          if constexpr (SearchDir == direction::kForward) {
+            // forward search goes strictly upward
+            if (neighbor_level <= curr_level) return;
+          } else {
+            // backward search goes strictly downward
+            if (neighbor_level >= curr_level) return;
           }
         }
         // ==========================

@@ -73,7 +73,8 @@ std::vector<std::optional<path>> route(
     elevation_storage const* = nullptr,
     std::function<bool(path const&)> const& do_reconstruct = [](path const&) {
       return false;
-    });
+    },
+    bool use_ch = false);
 
 std::optional<path> route(ways const&,
                           lookup const&,
@@ -103,7 +104,8 @@ std::vector<std::optional<path>> route(
     elevation_storage const* = nullptr,
     std::function<bool(path const&)> const& do_reconstruct = [](path const&) {
       return false;
-    });
+    },
+    bool use_ch = false);
 
 std::optional<path> route(ways const& w,
                           lookup const& l,
@@ -118,6 +120,6 @@ std::optional<path> route(ways const& w,
                           sharing_data const* sharing = nullptr,
                           elevation_storage const* = nullptr,
                           routing_algorithm = routing_algorithm::kDijkstra,
-                          bool use_ch = true);
+                          bool use_ch = false);
 
 }  // namespace osr

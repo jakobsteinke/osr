@@ -99,7 +99,9 @@ struct dijkstra {
                 std::cout << " -> DOMINATED\n";
               }
             }
-          });
+          },
+          false
+        );
     }
     return !max_reached_;
   }

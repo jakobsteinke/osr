@@ -27,6 +27,9 @@ struct bidirectional_dijkstra {
   using entry = typename Profile::entry;
   using hash = typename Profile::hash;
   using cost_map = typename ankerl::unordered_dense::map<key, entry, hash>;
+  bool use_ch_ = false;
+  void set_use_ch(bool b) { use_ch_ = b; }
+  bool use_ch() const { return use_ch_; }   // <-- add this
 
   constexpr static auto const kDebug = false;
   constexpr static auto const kLongestNodeDistance = cost_t{300};
@@ -108,7 +111,7 @@ struct bidirectional_dijkstra {
                   elevation_storage const* elevations,
                   dial<label, get_bucket>& pq,
                   cost_map& costs) {
-    auto const adjusted_max = (max + radius_) / 2U;
+    auto const adjusted_max = max; //(max + radius_) / 2U;
 
     auto const l = pq.pop();
     auto const curr = l.get_node();
@@ -156,7 +159,7 @@ struct bidirectional_dijkstra {
             }
           }
         },
-        true
+        false // use_ch_
       );
 
     // --- Meeting point handling (same as A*, just no heuristic!) ---
@@ -226,7 +229,7 @@ struct bidirectional_dijkstra {
                       curr_cost, opposite_curr_cost, curr, *opposite_curr);
                 }
               },
-              true
+              false // use_ch_
             );
         }
       }
@@ -242,7 +245,7 @@ struct bidirectional_dijkstra {
       auto const top_r =
           pq2_.empty() ? get_cost<direction::kBackward>(meet_point_2_)
                        : pq2_.buckets_[pq2_.get_next_bucket()].back().cost();
-      if (top_f + top_r >= best_cost_ + radius_) {  ////// mind radius
+      if (top_f >= best_cost_ && top_r >= best_cost_) {  ////// mind radius       top_f >= best_cost_ && top_r >= best_cost_    top_f + top_r >= best_cost_ + radius_
         if (kDebug) {
           std::cout << "stopping criterion met " << top_f << " " << top_r << " "
                     << best_cost_ << " " << radius_ << std::endl;

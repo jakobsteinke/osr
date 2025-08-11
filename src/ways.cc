@@ -31,11 +31,11 @@ ways::ways(std::filesystem::path p, cista::mmap::protection const mode)
           mm_vec<std::uint64_t>(mm("way_has_conditional_access_no"))},
       way_conditional_access_no_{mm("way_conditional_access_no")} 
       {
-        /*if (r_->node_ch_level_.size() != n_nodes()) {
+        if (r_->node_ch_level_.size() != n_nodes()) {
           r_->node_ch_level_.resize(n_nodes(), 0);
-        }*/
-        //auto& r = *r_;
-        //r.node_ch_level_.resize(n_nodes(), -1);
+        }
+        auto& r = *r_;
+        r.node_ch_level_.resize(n_nodes(), -1);
       }
 
 void ways::build_components() {

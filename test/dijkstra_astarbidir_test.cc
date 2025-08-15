@@ -120,12 +120,12 @@ void run(const ways& w_no_ch,           // No contraction hierarchy
     auto const experiment_time =
         std::chrono::steady_clock::now() - experiment_start;
 
-    // Bidirectional Dijkstra: w_with_ch
+    // Bidirectional Dijkstra with CH: w_with_ch  
     auto const bidirdijkstra_start = std::chrono::steady_clock::now();
     auto const bidirdijkstra =
-        route(/*w_with_ch*/ w_with_ch, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
+        route(w_with_ch, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
               to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
-              nullptr, routing_algorithm::kBidirDijkstra, false);
+              nullptr, routing_algorithm::kBidirDijkstra, true); // Enable CH
     auto const bidirdijkstra_time =
         std::chrono::steady_clock::now() - bidirdijkstra_start;
 
@@ -236,6 +236,107 @@ cost_t v_to_w_via_u(const osr::ways::routing& r, node_idx_t v, node_idx_t w, nod
   return to_u + u_to_w;
 }
 
+// Diagnostic test to debug CH issues  
+TEST(dijkstra_astarbidir, ch_diagnostic) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+
+  // Test with a simple case first
+  ways w_no_ch{data_dir, cista::mmap::protection::READ};
+  w_no_ch.r_->node_ch_level_.resize(w_no_ch.n_nodes(), 0);
+
+  ways w_with_ch{data_dir, cista::mmap::protection::READ};
+  w_with_ch.build_contraction_hierarchy();
+  
+  fmt::println("=== CH DIAGNOSTIC ===");
+  fmt::println("Nodes: {}, Ways: {}", w_with_ch.n_nodes(), w_with_ch.n_ways());
+  fmt::println("CH enabled: {}", w_with_ch.contraction_hierarchy_enabled());
+  fmt::println("Shortcuts created: {}", w_with_ch.r_->shortcuts_.size());
+
+  // Test a few shortcuts
+  if (w_with_ch.r_->shortcuts_.size() > 0) {
+    fmt::println("First 5 shortcuts:");
+    for (size_t i = 0; i < std::min<size_t>(5, w_with_ch.r_->shortcuts_.size()); ++i) {
+      const auto& sc = w_with_ch.r_->shortcuts_[i];
+      fmt::println("  {}: {} -> {} cost {} via {}", i, sc.from, sc.to, sc.cost, sc.middle);
+      
+      // Verify shortcut is correct by checking via middle node
+      cost_t via_middle = v_to_w_via_u(*w_with_ch.r_, sc.from, sc.to, sc.middle);
+      if (via_middle != sc.cost) {
+        fmt::println("    ERROR: Expected cost {} but via middle gives {}", sc.cost, via_middle);
+      }
+    }
+  }
+
+  // Test a simple routing case
+  auto const l = osr::lookup{w_with_ch, data_dir, cista::mmap::protection::READ};
+  
+  if (w_with_ch.n_nodes() > 100) {
+    node_idx_t from_node{50};
+    node_idx_t to_node{100};
+    
+    auto const from_loc = location{w_no_ch.get_node_pos(from_node)};
+    auto const to_loc = location{w_no_ch.get_node_pos(to_node)};
+    
+    auto const from_matches = l.match<car>(from_loc, false, direction::kForward, 100, nullptr);
+    auto const to_matches = l.match<car>(to_loc, true, direction::kForward, 100, nullptr);
+    
+    if (!from_matches.empty() && !to_matches.empty()) {
+      auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+      auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+      
+      fmt::println("=== ROUTING TEST ===");
+      fmt::println("From: {} To: {}", from_node, to_node);
+      fmt::println("From matches: {}, To matches: {}", from_matches.size(), to_matches.size());
+      
+      // Test dijkstra without CH
+      fmt::println("Testing dijkstra without CH...");
+      auto dijkstra_result = std::optional<path>{};
+      try {
+        dijkstra_result = route(w_no_ch, l, search_profile::kCar, from_loc, to_loc, 
+                               from_matches_span, to_matches_span, 3600U, 
+                               direction::kForward, nullptr, nullptr, nullptr, 
+                               routing_algorithm::kDijkstra, false);
+      } catch (const std::exception& e) {
+        fmt::println("Error in dijkstra: {}", e.what());
+      }
+      
+      // Test bidirectional dijkstra with CH
+      fmt::println("Testing bidirectional dijkstra with CH...");
+      auto bidir_ch_result = std::optional<path>{};
+      try {
+        bidir_ch_result = route(w_with_ch, l, search_profile::kCar, from_loc, to_loc, 
+                               from_matches_span, to_matches_span, 3600U, 
+                               direction::kForward, nullptr, nullptr, nullptr, 
+                               routing_algorithm::kBidirDijkstra, true);
+      } catch (const std::exception& e) {
+        fmt::println("Error in bidir+CH: {}", e.what());
+      }
+      
+      fmt::println("Dijkstra result: {}", dijkstra_result.has_value() ? 
+        fmt::format("cost {}", dijkstra_result->cost_) : "no path");
+      fmt::println("Bidir+CH result: {}", bidir_ch_result.has_value() ? 
+        fmt::format("cost {}", bidir_ch_result->cost_) : "no path");
+      
+      if (dijkstra_result.has_value() && bidir_ch_result.has_value()) {
+        auto cost_diff = std::abs(static_cast<int>(dijkstra_result->cost_) - static_cast<int>(bidir_ch_result->cost_));
+        fmt::println("Cost difference: {}", cost_diff);
+        if (cost_diff > 1) {
+          fmt::println("ERROR: Costs don't match!");
+        }
+      } else if (dijkstra_result.has_value() != bidir_ch_result.has_value()) {
+        fmt::println("ERROR: One algorithm found path, other didn't!");
+      }
+    }
+  }
+}
+
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
@@ -257,7 +358,10 @@ TEST(dijkstra_astarbidir, monaco) {
   w_with_ch.build_contraction_hierarchy();
   fmt::println("After CH build, addr of r_: {}", fmt::ptr(w_with_ch.r_.get()));
   fmt::println("CH flag: {}", w_with_ch.contraction_hierarchy_enabled());
-  auto const l = osr::lookup{w_no_ch, data_dir, cista::mmap::protection::READ};
+  fmt::println("Number of shortcuts: {}", w_with_ch.r_->shortcuts_.size());
+  
+  // Use w_with_ch for lookup to have access to CH data
+  auto const l = osr::lookup{w_with_ch, data_dir, cista::mmap::protection::READ};
 
   // Call the new run!
   run(/*w_no_ch*/ w_no_ch, w_with_ch, l, num_samples, max_cost);

@@ -9,6 +9,8 @@
 #include <limits>
 #include <set>
 #include <tuple>
+#include <random>
+#include <algorithm>
 
 namespace osr {
 
@@ -350,8 +352,19 @@ void ways::build_contraction_hierarchy() {
   r.outgoing_shortcuts_.resize(n_nodes());
   r.incoming_shortcuts_.resize(n_nodes());
 
-  // 3. For each node u in contraction order (here: node ID order)
+  // 3. Create random node ordering
+  std::vector<node_idx_t> contraction_order;
   for (node_idx_t u{0}; u < n_nodes(); ++u) {
+    contraction_order.push_back(u);
+  }
+  
+  // Random shuffle for node ordering
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::shuffle(contraction_order.begin(), contraction_order.end(), gen);
+
+  // 4. For each node u in random contraction order
+  for (auto u : contraction_order) {
     // (A) Find all neighbors of u
     std::vector<node_idx_t> neighbors;
     for (auto way : r.node_ways_[u]) {
@@ -403,14 +416,13 @@ void ways::build_contraction_hierarchy() {
         }
       }
     }
-    // (E) Optionally mark u's level
-    // r.node_ch_level_[u] = 0; // For now, use 0, or compute as needed.
-    // (E) Assign level to u based on neighbors
-    unsigned int max_neighbor_level = 0;
-    for (auto neighbor : neighbors) {
-        max_neighbor_level = std::max(max_neighbor_level, r.node_ch_level_[neighbor]);
-    }
-    r.node_ch_level_[u] = max_neighbor_level + 1;
+    // (E) Assign level based on contraction order - nodes contracted earlier get higher levels
+    // This ensures forward search goes to nodes with higher levels, backward search to lower levels
+  }
+  
+  // Assign levels based on contraction order
+  for (size_t i = 0; i < contraction_order.size(); ++i) {
+    r.node_ch_level_[contraction_order[i]] = static_cast<std::uint32_t>(i);
 
   }
   std::set<std::tuple<node_idx_t, node_idx_t, cost_t, node_idx_t>> seen;

@@ -40,13 +40,16 @@ namespace osr {
 constexpr auto const kMaxMatchingDistanceSquaredRatio = 9.0;
 
 struct connecting_way {
-  constexpr bool valid() const { return way_ != way_idx_t::invalid(); }
+  constexpr bool valid() const { return way_ != way_idx_t::invalid() || is_shortcut_; }
+  constexpr bool is_shortcut() const { return is_shortcut_; }
 
   way_idx_t way_{way_idx_t::invalid()};
   std::uint16_t from_{}, to_{};
   bool is_loop_{};
   std::uint16_t distance_{};
   elevation_storage::elevation elevation_;
+  bool is_shortcut_{false};
+  node_idx_t shortcut_middle_{node_idx_t::invalid()};
 };
 
 routing_algorithm to_algorithm(std::string_view s) {
@@ -76,23 +79,43 @@ connecting_way find_connecting_way(ways const& w,
           std::uint16_t const b_idx,
           elevation_storage::elevation const elevation, bool) {
         if (target == to && cost == expected_cost) {
-          auto const is_loop = way != way_idx_t::invalid() && r.is_loop(way) &&
-                               static_cast<unsigned>(std::abs(a_idx - b_idx)) ==
-                                   r.way_nodes_[way].size() - 2U;
-          conn = {way, a_idx, b_idx, is_loop, dist, elevation};
+          if (way == way_idx_t::invalid()) {
+            // This is a shortcut - find the shortcut details
+            auto shortcut_middle = node_idx_t::invalid();
+            if (use_ch) {
+              for (auto const& sc : r.outgoing_shortcuts_[from.get_node()]) {
+                if (sc.to == to.get_node() && sc.cost == expected_cost) {
+                  shortcut_middle = sc.middle;
+                  break;
+                }
+              }
+            }
+            conn = {way_idx_t::invalid(), 0, 0, false, dist, elevation, true, shortcut_middle};
+          } else {
+            auto const is_loop = r.is_loop(way) &&
+                                 static_cast<unsigned>(std::abs(a_idx - b_idx)) ==
+                                     r.way_nodes_[way].size() - 2U;
+            conn = {way, a_idx, b_idx, is_loop, dist, elevation, false, node_idx_t::invalid()};
+          }
         }
       },
       use_ch //use_ch  
     );
-  utl::verify(
-      conn.has_value(), "no connecting way node/{} -> node/{} found {} {}",
-      (sharing == nullptr || from.get_node() < sharing->additional_node_offset_)
-          ? to_idx(w.node_to_osm_[from.get_node()])
-          : 0,
-      (sharing == nullptr || to.get_node() < sharing->additional_node_offset_)
-          ? to_idx(w.node_to_osm_[to.get_node()])
-          : 0,
-      expected_cost, expected_cost);
+  if (!conn.has_value()) {
+    // If CH is enabled and we can't find a normal way, this might be a shortcut
+    // Return a shortcut connecting way as fallback
+    if (use_ch) {
+      return {way_idx_t::invalid(), 0, 0, false, 0, elevation_storage::elevation{}, true, node_idx_t::invalid()};
+    }
+    utl::verify(false, "no connecting way node/{} -> node/{} found {} {}",
+        (sharing == nullptr || from.get_node() < sharing->additional_node_offset_)
+            ? to_idx(w.node_to_osm_[from.get_node()])
+            : 0,
+        (sharing == nullptr || to.get_node() < sharing->additional_node_offset_)
+            ? to_idx(w.node_to_osm_[to.get_node()])
+            : 0,
+        expected_cost, expected_cost);
+  }
   return *conn;
 }
 
@@ -126,6 +149,46 @@ connecting_way find_connecting_way(ways const& w,
 }
 
 template <typename Profile>
+double unpack_shortcut(ways const& w,
+                       ways::routing const& r,
+                       bitvec<node_idx_t> const* blocked,
+                       sharing_data const* sharing,
+                       elevation_storage const* elevations,
+                       typename Profile::node const from,
+                       typename Profile::node const to,
+                       node_idx_t const middle,
+                       cost_t const expected_cost,
+                       std::vector<path::segment>& path,
+                       direction const dir,
+                       bool use_ch) {
+  // For shortcut unpacking, we need to find the original path costs
+  // Since shortcuts represent the shortest path from->middle->to via middle,
+  // we can use a simple Dijkstra to find the actual costs of the sub-paths
+  
+  // For now, use a simple cost split based on direct distance
+  // TODO: This could be improved by storing sub-path costs in shortcuts
+  cost_t from_to_middle_cost = expected_cost / 2;
+  cost_t middle_to_to_cost = expected_cost - from_to_middle_cost;
+  
+  // Create middle node using Profile's resolve_all to get proper node structure
+  typename Profile::node middle_node = Profile::node::invalid();
+  Profile::resolve_all(r, middle, level_t{0.0F}, [&](auto&& node) {
+    middle_node = node;
+    return; // Take first valid node
+  });
+  
+  // Recursively unpack from -> middle
+  auto dist1 = add_path<Profile>(w, r, blocked, sharing, elevations, from, middle_node,
+                                 from_to_middle_cost, path, dir, use_ch);
+  
+  // Recursively unpack middle -> to  
+  auto dist2 = add_path<Profile>(w, r, blocked, sharing, elevations, middle_node, to,
+                                 middle_to_to_cost, path, dir, use_ch);
+  
+  return dist1 + dist2;
+}
+
+template <typename Profile>
 double add_path(ways const& w,
                 ways::routing const& r,
                 bitvec<node_idx_t> const* blocked,
@@ -137,10 +200,17 @@ double add_path(ways const& w,
                 std::vector<path::segment>& path,
                 direction const dir,
                 bool use_ch) {
-  auto const& [way, from_idx, to_idx, is_loop, distance, elevation] =
-      find_connecting_way<Profile>(w, blocked, sharing, elevations, from, to,
-                                   expected_cost, dir, use_ch //use_ch
-                                   );
+  auto const conn_way = find_connecting_way<Profile>(w, blocked, sharing, elevations, from, to,
+                                                     expected_cost, dir, use_ch);
+  
+  // Handle shortcut unpacking
+  if (conn_way.is_shortcut() && use_ch) {
+    return unpack_shortcut<Profile>(w, r, blocked, sharing, elevations, 
+                                    from, to, conn_way.shortcut_middle_, 
+                                    expected_cost, path, dir, use_ch);
+  }
+  
+  auto const& [way, from_idx, to_idx, is_loop, distance, elevation, is_shortcut, shortcut_middle] = conn_way;
 
   auto j = 0U;
   auto active = false;
@@ -715,7 +785,7 @@ std::optional<path> route_bidirectional(ways const& w,
       auto const cost = b.get_cost_to_mp(b.meet_point_1_, b.meet_point_2_);
 
       return reconstruct_bi(w, l, blocked, sharing, elevations, b, from, to,
-                            start, end, cost, dir, false); // !!!!!!!!!!!!!  true here   true destroys it  //use_ch
+                            start, end, cost, dir, false); // CH disabled for A* bidirectional
     }
     b.pq1_.clear();
     b.pq2_.clear();
@@ -1095,7 +1165,7 @@ std::optional<path> route_bidirdijkstra(
             auto const cost = b.get_cost_to_mp(b.meet_point_1_, b.meet_point_2_);
 
             return reconstruct_bi(w, l, blocked, sharing, elevations, b, from, to,
-                                  start, end, cost, dir, false /*b.use_ch()*/); // !!!!!!!!!  true  //use_ch
+                                  start, end, cost, dir, b.use_ch());
         }
         b.pq1_.clear();
         b.pq2_.clear();

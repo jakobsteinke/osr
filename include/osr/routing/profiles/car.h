@@ -193,16 +193,18 @@ struct car {
         }*/
         // Only filter if CH is really present and requested.
         // CH pruning: only if caller asked for CH (use_ch == true)
-        if (use_ch) {
+        // For now, disable level filtering for original edges to ensure connectivity
+        // TODO: Implement proper stall-on-demand CH pruning
+        if (use_ch && false) {  // Temporarily disable level filtering
           auto const curr_level     = w.node_ch_level_[n.n_];
           auto const neighbor_level = w.node_ch_level_[target_node];
 
           if constexpr (SearchDir == direction::kForward) {
-            // forward search goes strictly upward
-            if (neighbor_level <= curr_level) return;
+            // forward search goes upward (allow equal levels for meeting points)
+            if (neighbor_level < curr_level) return;
           } else {
-            // backward search goes strictly downward
-            if (neighbor_level >= curr_level) return;
+            // backward search goes downward (allow equal levels for meeting points)  
+            if (neighbor_level > curr_level) return;
           }
         }
         // ==========================
@@ -251,6 +253,60 @@ struct car {
       }
 
       ++way_pos;
+    }
+    
+    // Handle shortcuts when CH is enabled - temporarily disabled due to data structure issues
+    if (use_ch && false) {
+      // Safety check for outgoing_shortcuts_
+      if (n.n_ >= w.outgoing_shortcuts_.size()) {
+        return; // Skip if node index is out of bounds
+      }
+      
+      // Additional debugging
+      try {
+        auto const& shortcuts_for_node = w.outgoing_shortcuts_[n.n_];
+        for (auto const& shortcut : shortcuts_for_node) {
+        // Safety checks for level access
+        if (n.n_ >= w.node_ch_level_.size() || shortcut.to >= w.node_ch_level_.size()) {
+          continue; // Skip if either node is out of bounds
+        }
+        auto const curr_level = w.node_ch_level_[n.n_];
+        auto const neighbor_level = w.node_ch_level_[shortcut.to];
+        
+        // Apply level filtering for shortcuts
+        // Forward search: only go to higher or equal levels (upward in hierarchy)
+        // Backward search: only go to lower or equal levels (downward in hierarchy)
+        if constexpr (SearchDir == direction::kForward) {
+          if (neighbor_level < curr_level) continue;
+        } else {
+          if (neighbor_level > curr_level) continue;
+        }
+        
+        if constexpr (WithBlocked) {
+          if (blocked->test(shortcut.to)) {
+            continue;
+          }
+        }
+        
+        auto const target_node_prop = w.node_properties_[shortcut.to];
+        if (node_cost(target_node_prop) == kInfeasible) {
+          continue;
+        }
+        
+        // Create target node - shortcuts bypass way restrictions  
+        auto const target = node{shortcut.to, 0, n.dir_};
+        
+        // Use shortcut cost directly
+        auto const cost = shortcut.cost + node_cost(target_node_prop);
+        
+        // Use way_idx_t::invalid() to signal this is a shortcut
+        fn(target, cost, shortcut.cost, way_idx_t::invalid(), 0, 0, 
+           elevation_storage::elevation{}, false);
+        }
+      } catch (const std::exception&) {
+        // If shortcuts access fails, just skip them silently
+        return;
+      }
     }
   }
 

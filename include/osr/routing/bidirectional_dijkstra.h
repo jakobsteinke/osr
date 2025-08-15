@@ -159,7 +159,7 @@ struct bidirectional_dijkstra {
             }
           }
         },
-        false // use_ch_
+        use_ch_
       );
 
     // --- Meeting point handling (same as A*, just no heuristic!) ---
@@ -229,7 +229,7 @@ struct bidirectional_dijkstra {
                       curr_cost, opposite_curr_cost, curr, *opposite_curr);
                 }
               },
-              false // use_ch_
+              use_ch_
             );
         }
       }

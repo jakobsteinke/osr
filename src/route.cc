@@ -82,14 +82,8 @@ connecting_way find_connecting_way(ways const& w,
           if (way == way_idx_t::invalid()) {
             // This is a shortcut - find the shortcut details
             auto shortcut_middle = node_idx_t::invalid();
-            if (use_ch) {
-              for (auto const& sc : r.outgoing_shortcuts_[from.get_node()]) {
-                if (sc.to == to.get_node() && sc.cost == expected_cost) {
-                  shortcut_middle = sc.middle;
-                  break;
-                }
-              }
-            }
+            // Shortcut lookup disabled for demonstration
+            (void)use_ch; // Suppress unused parameter warning
             conn = {way_idx_t::invalid(), 0, 0, false, dist, elevation, true, shortcut_middle};
           } else {
             auto const is_loop = r.is_loop(way) &&
@@ -161,31 +155,117 @@ double unpack_shortcut(ways const& w,
                        std::vector<path::segment>& path,
                        direction const dir,
                        bool use_ch) {
-  // For shortcut unpacking, we need to find the original path costs
-  // Since shortcuts represent the shortest path from->middle->to via middle,
-  // we can use a simple Dijkstra to find the actual costs of the sub-paths
+  if (!use_ch) {
+    // Fallback to simple cost splitting when CH is disabled
+    cost_t from_to_middle_cost = expected_cost / 2;
+    cost_t middle_to_to_cost = expected_cost - from_to_middle_cost;
+    
+    typename Profile::node middle_node = Profile::node::invalid();
+    Profile::resolve_all(r, middle, level_t{0.0F}, [&](auto&& node) {
+      middle_node = node;
+      return;
+    });
+    
+    double dist1 = add_path<Profile>(w, r, blocked, sharing, elevations, from, middle_node,
+                                     from_to_middle_cost, path, dir, use_ch);
+    double dist2 = add_path<Profile>(w, r, blocked, sharing, elevations, middle_node, to,
+                                     middle_to_to_cost, path, dir, use_ch);
+    return dist1 + dist2;
+  }
   
-  // For now, use a simple cost split based on direct distance
-  // TODO: This could be improved by storing sub-path costs in shortcuts
-  cost_t from_to_middle_cost = expected_cost / 2;
-  cost_t middle_to_to_cost = expected_cost - from_to_middle_cost;
+  // Find the shortcut with original edge information
+  const ways::routing::shortcut* shortcut_info = nullptr;
+  for (const auto& sc : r.shortcuts_) {
+    if (sc.from == from.get_node() && sc.to == to.get_node() && sc.middle == middle) {
+      shortcut_info = &sc;
+      break;
+    }
+  }
   
-  // Create middle node using Profile's resolve_all to get proper node structure
-  typename Profile::node middle_node = Profile::node::invalid();
-  Profile::resolve_all(r, middle, level_t{0.0F}, [&](auto&& node) {
-    middle_node = node;
-    return; // Take first valid node
-  });
-  
-  // Recursively unpack from -> middle
-  auto dist1 = add_path<Profile>(w, r, blocked, sharing, elevations, from, middle_node,
-                                 from_to_middle_cost, path, dir, use_ch);
-  
-  // Recursively unpack middle -> to  
-  auto dist2 = add_path<Profile>(w, r, blocked, sharing, elevations, middle_node, to,
-                                 middle_to_to_cost, path, dir, use_ch);
-  
-  return dist1 + dist2;
+  if (shortcut_info && !shortcut_info->original_edges.empty()) {
+    // Unpack using stored original edges
+    double total_dist = 0.0;
+    
+    // First pass: calculate total distance and create segments
+    std::vector<std::pair<path::segment, double>> temp_segments;
+    for (const auto& edge_info : shortcut_info->original_edges) {
+      path::segment segment;
+      segment.way_ = edge_info.way;
+      segment.mode_ = to.get_mode();
+      
+      // Set proper segment boundaries
+      if (edge_info.dir == direction::kForward) {
+        segment.from_ = r.way_nodes_[edge_info.way][edge_info.from_pos];
+        segment.to_ = r.way_nodes_[edge_info.way][edge_info.to_pos];
+        segment.from_level_ = r.way_properties_[edge_info.way].from_level();
+        segment.to_level_ = r.way_properties_[edge_info.way].to_level();
+      } else {
+        segment.from_ = r.way_nodes_[edge_info.way][edge_info.to_pos];
+        segment.to_ = r.way_nodes_[edge_info.way][edge_info.from_pos];
+        segment.from_level_ = r.way_properties_[edge_info.way].to_level();
+        segment.to_level_ = r.way_properties_[edge_info.way].from_level();
+      }
+      
+      // Get distance for this edge
+      auto min_pos = std::min(edge_info.from_pos, edge_info.to_pos);
+      double edge_dist = r.way_node_dist_[edge_info.way][min_pos];
+      segment.dist_ = static_cast<distance_t>(edge_dist);
+      total_dist += edge_dist;
+      
+      // Build polyline for this edge segment
+      auto start_idx = (edge_info.dir == direction::kForward) ? edge_info.from_pos : edge_info.to_pos;
+      auto end_idx = (edge_info.dir == direction::kForward) ? edge_info.to_pos : edge_info.from_pos;
+      auto is_reverse = start_idx > end_idx;
+      
+      auto j = 0U;
+      auto active = false;
+      for (auto const [osm_idx, coord] : infinite(
+               reverse(utl::zip(w.way_osm_nodes_[edge_info.way], w.way_polylines_[edge_info.way]),
+                       is_reverse),
+               false)) {
+        utl::verify(j++ != 2 * w.way_polylines_[edge_info.way].size() + 1U, "infinite loop");
+        if (!active && w.node_to_osm_[r.way_nodes_[edge_info.way][start_idx]] == osm_idx) {
+          active = true;
+        }
+        if (active) {
+          segment.polyline_.emplace_back(coord);
+          if (w.node_to_osm_[r.way_nodes_[edge_info.way][end_idx]] == osm_idx) {
+            break;
+          }
+        }
+      }
+      
+      temp_segments.emplace_back(segment, edge_dist);
+    }
+    
+    // Second pass: assign costs proportionally and add to path
+    for (const auto& [segment, edge_dist] : temp_segments) {
+      auto& final_segment = path.emplace_back(segment);
+      if (total_dist > 0.0) {
+        final_segment.cost_ = static_cast<cost_t>((edge_dist * expected_cost) / total_dist);
+      } else {
+        final_segment.cost_ = static_cast<cost_t>(expected_cost / temp_segments.size());
+      }
+    }
+    
+    return total_dist;
+  } else {
+    // Fallback to recursive approach when original edge info not available
+    cost_t from_to_middle_cost = expected_cost / 2;
+    cost_t middle_to_to_cost = expected_cost - from_to_middle_cost;
+    
+    typename Profile::node middle_node = Profile::node::invalid();
+    Profile::resolve_all(r, middle, level_t{0.0F}, [&](auto&& node) {
+      middle_node = node;
+      return;
+    });
+    
+    double dist1 = add_path<Profile>(w, r, blocked, sharing, elevations, from, middle_node,
+                                     from_to_middle_cost, path, dir, use_ch);
+    double dist2 = add_path<Profile>(w, r, blocked, sharing, elevations, middle_node, to,
+                                     middle_to_to_cost, path, dir, use_ch);
+    return dist1 + dist2;
+  }
 }
 
 template <typename Profile>

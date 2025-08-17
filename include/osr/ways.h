@@ -288,6 +288,15 @@ struct ways {
       node_idx_t to;
       cost_t cost;
       node_idx_t middle;
+      
+      // For path reconstruction: store the original edge sequence
+      struct edge_info {
+        way_idx_t way;
+        std::uint16_t from_pos;
+        std::uint16_t to_pos;
+        direction dir;
+      };
+      vec<edge_info> original_edges;  // Original edges replaced by this shortcut
     };
 
     vec<shortcut> shortcuts_;  

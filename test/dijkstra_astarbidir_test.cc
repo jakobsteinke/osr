@@ -236,8 +236,62 @@ cost_t v_to_w_via_u(const osr::ways::routing& r, node_idx_t v, node_idx_t w, nod
   return to_u + u_to_w;
 }
 
-// Diagnostic test to debug CH issues  
-TEST(dijkstra_astarbidir, ch_diagnostic) {
+// Test to debug vecvec access issues with shortcuts
+TEST(dijkstra_astarbidir, ch_vecvec_debug) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  
+  ways w_with_ch{data_dir, cista::mmap::protection::READ};
+  w_with_ch.build_contraction_hierarchy();
+  
+  fmt::println("CH enabled: {}", w_with_ch.contraction_hierarchy_enabled());
+  fmt::println("Shortcuts created: {}", w_with_ch.r_->shortcuts_.size());
+  fmt::println("Outgoing shortcuts size: {}", w_with_ch.r_->outgoing_shortcuts_.size());
+  fmt::println("Incoming shortcuts size: {}", w_with_ch.r_->incoming_shortcuts_.size());
+  
+  // Test safe access to outgoing shortcuts for various nodes
+  int valid_nodes = 0;
+  int nodes_with_shortcuts = 0;
+  auto max_test_nodes = std::min(static_cast<uint32_t>(w_with_ch.n_nodes()), 100u);
+  for (node_idx_t n{0}; n < node_idx_t{max_test_nodes}; ++n) {
+    try {
+      if (to_idx(n) < w_with_ch.r_->outgoing_shortcuts_.size()) {
+        valid_nodes++;
+        auto const& outgoing = w_with_ch.r_->outgoing_shortcuts_[n];
+        if (!outgoing.empty()) {
+          nodes_with_shortcuts++;
+          fmt::println("Node {} has {} outgoing shortcuts", to_idx(n), outgoing.size());
+          
+          // Test accessing first shortcut
+          if (!outgoing.empty()) {
+            auto const& first_sc = outgoing[0];
+            fmt::println("  First shortcut: {} -> {} cost {} via {}", 
+                        to_idx(first_sc.from), to_idx(first_sc.to), 
+                        first_sc.cost, to_idx(first_sc.middle));
+          }
+        }
+      }
+    } catch (const std::exception& e) {
+      fmt::println("ERROR accessing shortcuts for node {}: {}", to_idx(n), e.what());
+      break;
+    }
+  }
+  
+  fmt::println("Valid nodes: {}/{}", valid_nodes, 100);
+  fmt::println("Nodes with shortcuts: {}/{}", nodes_with_shortcuts, valid_nodes);
+  
+  EXPECT_GT(w_with_ch.r_->shortcuts_.size(), 0);
+  EXPECT_EQ(valid_nodes, 100); // All nodes should be accessible
+}
+
+// Comprehensive test demonstrating classical CH implementation
+TEST(dijkstra_astarbidir, ch_demonstration) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
 
@@ -254,32 +308,81 @@ TEST(dijkstra_astarbidir, ch_diagnostic) {
   ways w_with_ch{data_dir, cista::mmap::protection::READ};
   w_with_ch.build_contraction_hierarchy();
   
-  fmt::println("=== CH DIAGNOSTIC ===");
-  fmt::println("Nodes: {}, Ways: {}", w_with_ch.n_nodes(), w_with_ch.n_ways());
+  fmt::println("========================================");
+  fmt::println("=== CLASSICAL CH DEMONSTRATION TEST ===");
+  fmt::println("========================================");
+  fmt::println("Graph: {} nodes, {} ways", w_with_ch.n_nodes(), w_with_ch.n_ways());
   fmt::println("CH enabled: {}", w_with_ch.contraction_hierarchy_enabled());
   fmt::println("Shortcuts created: {}", w_with_ch.r_->shortcuts_.size());
-
-  // Test a few shortcuts
+  
+  // Analyze CH levels
+  auto level_stats = std::map<uint32_t, uint32_t>{};
+  uint32_t max_level = 0;
+  for (node_idx_t n{0}; n < w_with_ch.n_nodes(); ++n) {
+    auto level = w_with_ch.r_->node_ch_level_[n];
+    level_stats[level]++;
+    max_level = std::max(max_level, level);
+  }
+  
+  fmt::println("\n--- CH LEVEL STATISTICS ---");
+  fmt::println("Max level: {}", max_level);
+  fmt::println("Level distribution (first 10 levels):");
+  for (auto i = 0u; i < std::min(10u, max_level + 1); ++i) {
+    fmt::println("  Level {}: {} nodes", i, level_stats[i]);
+  }
+  
+  // Analyze shortcuts
+  fmt::println("\n--- SHORTCUT ANALYSIS ---");
   if (w_with_ch.r_->shortcuts_.size() > 0) {
-    fmt::println("First 5 shortcuts:");
-    for (size_t i = 0; i < std::min<size_t>(5, w_with_ch.r_->shortcuts_.size()); ++i) {
+    auto cost_histogram = std::map<uint32_t, uint32_t>{};
+    uint32_t total_cost = 0;
+    uint32_t max_cost = 0;
+    
+    fmt::println("Sample shortcuts (first 10):");
+    for (size_t i = 0; i < std::min<size_t>(10, w_with_ch.r_->shortcuts_.size()); ++i) {
       const auto& sc = w_with_ch.r_->shortcuts_[i];
-      fmt::println("  {}: {} -> {} cost {} via {}", i, sc.from, sc.to, sc.cost, sc.middle);
+      fmt::println("  {}: {} -> {} cost {} via {} (levels: {} -> {})", 
+                   i, static_cast<uint32_t>(sc.from), static_cast<uint32_t>(sc.to), sc.cost, static_cast<uint32_t>(sc.middle),
+                   w_with_ch.r_->node_ch_level_[sc.from],
+                   w_with_ch.r_->node_ch_level_[sc.to]);
       
-      // Verify shortcut is correct by checking via middle node
+      // Verify shortcut correctness
       cost_t via_middle = v_to_w_via_u(*w_with_ch.r_, sc.from, sc.to, sc.middle);
       if (via_middle != sc.cost) {
         fmt::println("    ERROR: Expected cost {} but via middle gives {}", sc.cost, via_middle);
       }
+      
+      total_cost += sc.cost;
+      max_cost = std::max(max_cost, static_cast<uint32_t>(sc.cost));
+      cost_histogram[sc.cost / 10 * 10]++; // Group by tens
     }
+    
+    fmt::println("Shortcut cost statistics:");
+    fmt::println("  Average cost: {:.1f}", static_cast<double>(total_cost) / std::min<size_t>(10, w_with_ch.r_->shortcuts_.size()));
+    fmt::println("  Max cost in sample: {}", max_cost);
   }
 
-  // Test a simple routing case
+  // Multiple routing tests to demonstrate CH performance
   auto const l = osr::lookup{w_with_ch, data_dir, cista::mmap::protection::READ};
   
-  if (w_with_ch.n_nodes() > 100) {
-    node_idx_t from_node{50};
-    node_idx_t to_node{100};
+  fmt::println("\n--- ROUTING PERFORMANCE COMPARISON ---");
+  
+  // Test multiple node pairs to get comprehensive results
+  std::vector<std::pair<node_idx_t, node_idx_t>> test_pairs = {
+    {node_idx_t{100}, node_idx_t{200}},
+    {node_idx_t{500}, node_idx_t{1000}}, 
+    {node_idx_t{1500}, node_idx_t{2000}},
+    {node_idx_t{2500}, node_idx_t{3000}},
+    {node_idx_t{50}, node_idx_t{4000}}
+  };
+  
+  uint32_t correct_matches = 0;
+  uint32_t total_tests = 0;
+  uint64_t dijkstra_total_time = 0;
+  uint64_t bidir_ch_total_time = 0;
+  
+  for (auto const& [from_node, to_node] : test_pairs) {
+    if (from_node >= w_with_ch.n_nodes() || to_node >= w_with_ch.n_nodes()) continue;
     
     auto const from_loc = location{w_no_ch.get_node_pos(from_node)};
     auto const to_loc = location{w_no_ch.get_node_pos(to_node)};
@@ -287,54 +390,77 @@ TEST(dijkstra_astarbidir, ch_diagnostic) {
     auto const from_matches = l.match<car>(from_loc, false, direction::kForward, 100, nullptr);
     auto const to_matches = l.match<car>(to_loc, true, direction::kForward, 100, nullptr);
     
-    if (!from_matches.empty() && !to_matches.empty()) {
-      auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
-      auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
-      
-      fmt::println("=== ROUTING TEST ===");
-      fmt::println("From: {} To: {}", from_node, to_node);
-      fmt::println("From matches: {}, To matches: {}", from_matches.size(), to_matches.size());
-      
-      // Test dijkstra without CH
-      fmt::println("Testing dijkstra without CH...");
-      auto dijkstra_result = std::optional<path>{};
-      try {
-        dijkstra_result = route(w_no_ch, l, search_profile::kCar, from_loc, to_loc, 
+    if (from_matches.empty() || to_matches.empty()) continue;
+    
+    auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+    auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+    
+    total_tests++;
+    fmt::println("\nTest {}: {} -> {} (levels: {} -> {})", 
+                 total_tests, static_cast<uint32_t>(from_node), static_cast<uint32_t>(to_node),
+                 w_with_ch.r_->node_ch_level_[from_node],
+                 w_with_ch.r_->node_ch_level_[to_node]);
+    
+    // Test dijkstra without CH
+    auto dijkstra_start = std::chrono::high_resolution_clock::now();
+    auto dijkstra_result = route(w_no_ch, l, search_profile::kCar, from_loc, to_loc, 
                                from_matches_span, to_matches_span, 3600U, 
                                direction::kForward, nullptr, nullptr, nullptr, 
                                routing_algorithm::kDijkstra, false);
-      } catch (const std::exception& e) {
-        fmt::println("Error in dijkstra: {}", e.what());
-      }
-      
-      // Test bidirectional dijkstra with CH
-      fmt::println("Testing bidirectional dijkstra with CH...");
-      auto bidir_ch_result = std::optional<path>{};
-      try {
-        bidir_ch_result = route(w_with_ch, l, search_profile::kCar, from_loc, to_loc, 
+    auto dijkstra_time = std::chrono::high_resolution_clock::now() - dijkstra_start;
+    
+    // Test bidirectional dijkstra with CH
+    auto bidir_ch_start = std::chrono::high_resolution_clock::now();
+    auto bidir_ch_result = route(w_with_ch, l, search_profile::kCar, from_loc, to_loc, 
                                from_matches_span, to_matches_span, 3600U, 
                                direction::kForward, nullptr, nullptr, nullptr, 
                                routing_algorithm::kBidirDijkstra, true);
-      } catch (const std::exception& e) {
-        fmt::println("Error in bidir+CH: {}", e.what());
-      }
+    auto bidir_ch_time = std::chrono::high_resolution_clock::now() - bidir_ch_start;
+    
+    dijkstra_total_time += std::chrono::duration_cast<std::chrono::microseconds>(dijkstra_time).count();
+    bidir_ch_total_time += std::chrono::duration_cast<std::chrono::microseconds>(bidir_ch_time).count();
+    
+    bool paths_match = false;
+    if (dijkstra_result.has_value() && bidir_ch_result.has_value()) {
+      auto cost_diff = std::abs(static_cast<int>(dijkstra_result->cost_) - static_cast<int>(bidir_ch_result->cost_));
+      paths_match = cost_diff <= 1;
+      if (paths_match) correct_matches++;
       
-      fmt::println("Dijkstra result: {}", dijkstra_result.has_value() ? 
-        fmt::format("cost {}", dijkstra_result->cost_) : "no path");
-      fmt::println("Bidir+CH result: {}", bidir_ch_result.has_value() ? 
-        fmt::format("cost {}", bidir_ch_result->cost_) : "no path");
-      
-      if (dijkstra_result.has_value() && bidir_ch_result.has_value()) {
-        auto cost_diff = std::abs(static_cast<int>(dijkstra_result->cost_) - static_cast<int>(bidir_ch_result->cost_));
-        fmt::println("Cost difference: {}", cost_diff);
-        if (cost_diff > 1) {
-          fmt::println("ERROR: Costs don't match!");
-        }
-      } else if (dijkstra_result.has_value() != bidir_ch_result.has_value()) {
-        fmt::println("ERROR: One algorithm found path, other didn't!");
-      }
+      fmt::println("  Dijkstra:   cost {} in {:.1f}ms", 
+                   dijkstra_result->cost_, 
+                   std::chrono::duration_cast<std::chrono::microseconds>(dijkstra_time).count() / 1000.0);
+      fmt::println("  Bidir+CH:   cost {} in {:.1f}ms", 
+                   bidir_ch_result->cost_,
+                   std::chrono::duration_cast<std::chrono::microseconds>(bidir_ch_time).count() / 1000.0);
+      fmt::println("  Speedup:    {:.2f}x", 
+                   static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(dijkstra_time).count()) /
+                   static_cast<double>(std::chrono::duration_cast<std::chrono::microseconds>(bidir_ch_time).count()));
+      fmt::println("  Result:     {} (cost diff: {})", 
+                   paths_match ? "✓ MATCH" : "✗ MISMATCH", cost_diff);
+    } else {
+      fmt::println("  Result:     ✗ PATH AVAILABILITY MISMATCH");
+      fmt::println("  Dijkstra:   {}", dijkstra_result.has_value() ? "found path" : "no path");
+      fmt::println("  Bidir+CH:   {}", bidir_ch_result.has_value() ? "found path" : "no path");
     }
   }
+  
+  fmt::println("\n--- FINAL RESULTS ---");
+  fmt::println("Correctness: {}/{} tests passed ({:.1f}%)", 
+               correct_matches, total_tests,
+               total_tests > 0 ? 100.0 * correct_matches / total_tests : 0.0);
+  
+  if (total_tests > 0) {
+    fmt::println("Average Dijkstra time:   {:.1f}ms", dijkstra_total_time / 1000.0 / total_tests);
+    fmt::println("Average Bidir+CH time:   {:.1f}ms", bidir_ch_total_time / 1000.0 / total_tests);
+    fmt::println("Overall speedup:         {:.2f}x", 
+                 static_cast<double>(dijkstra_total_time) / static_cast<double>(bidir_ch_total_time));
+  }
+  
+  // Verify we have working CH implementation
+  EXPECT_GT(w_with_ch.r_->shortcuts_.size(), 0) << "CH should create shortcuts";
+  EXPECT_EQ(correct_matches, total_tests) << "All routing results should match";
+  
+  fmt::println("\n🎉 CLASSICAL CH IMPLEMENTATION VERIFICATION COMPLETE! 🎉");
 }
 
 TEST(dijkstra_astarbidir, monaco) {

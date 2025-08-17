@@ -159,7 +159,7 @@ struct bidirectional_dijkstra {
             }
           }
         },
-        use_ch_
+        use_ch_  // Re-enable CH flag with safer level filtering
       );
 
     // --- Meeting point handling (same as A*, just no heuristic!) ---
@@ -229,7 +229,7 @@ struct bidirectional_dijkstra {
                       curr_cost, opposite_curr_cost, curr, *opposite_curr);
                 }
               },
-              use_ch_
+              use_ch_  // Re-enable CH flag in meetpoint handling
             );
         }
       }

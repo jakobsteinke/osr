@@ -10,6 +10,8 @@
 #endif
 #include <filesystem>
 #include <ranges>
+#include <unordered_map>
+#include <vector>
 
 #include "fmt/ranges.h"
 #include "fmt/std.h"
@@ -288,20 +290,12 @@ struct ways {
       node_idx_t to;
       cost_t cost;
       node_idx_t middle;
-      
-      // For path reconstruction: store the original edge sequence
-      struct edge_info {
-        way_idx_t way;
-        std::uint16_t from_pos;
-        std::uint16_t to_pos;
-        direction dir;
-      };
-      vec<edge_info> original_edges;  // Original edges replaced by this shortcut
+      // Simplified: remove original_edges to avoid nested vector issues
     };
 
     vec<shortcut> shortcuts_;  
-    vecvec<node_idx_t, shortcut> outgoing_shortcuts_;
-    vecvec<node_idx_t, shortcut> incoming_shortcuts_;
+    cista::raw::hash_map<node_idx_t, cista::raw::vector<uint32_t>> outgoing_shortcuts_;  // Store indices into shortcuts_ vector
+    cista::raw::hash_map<node_idx_t, cista::raw::vector<uint32_t>> incoming_shortcuts_;  // Store indices into shortcuts_ vector
     bool contraction_hierarchy_enabled_ = false;   // Abbiege restrcitions, wege merken die das ersetzt 
   };
 

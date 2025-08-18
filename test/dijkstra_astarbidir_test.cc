@@ -268,12 +268,15 @@ TEST(dijkstra_astarbidir, ch_vecvec_debug) {
           nodes_with_shortcuts++;
           fmt::println("Node {} has {} outgoing shortcuts", to_idx(n), outgoing.size());
           
-          // Test accessing first shortcut
+          // Test accessing first shortcut via index
           if (!outgoing.empty()) {
-            auto const& first_sc = outgoing[0];
-            fmt::println("  First shortcut: {} -> {} cost {} via {}", 
-                        to_idx(first_sc.from), to_idx(first_sc.to), 
-                        first_sc.cost, to_idx(first_sc.middle));
+            auto const shortcut_idx = outgoing[0];
+            if (shortcut_idx < w_with_ch.r_->shortcuts_.size()) {
+              auto const& first_sc = w_with_ch.r_->shortcuts_[shortcut_idx];
+              fmt::println("  First shortcut: {} -> {} cost {} via {}", 
+                          to_idx(first_sc.from), to_idx(first_sc.to), 
+                          first_sc.cost, to_idx(first_sc.middle));
+            }
           }
         }
       }

@@ -278,16 +278,42 @@ void ways::routing::write(std::filesystem::path const& p) const {
   return cista::write(p / "routing.bin", *this);
 }
 
-void deduplicate_shortcuts(osr::ways::routing& r) {
-  std::sort(begin(r.shortcuts_), end(r.shortcuts_), [](const auto& a, const auto& b) {
-    return std::tie(a.from, a.to, a.cost, a.middle) < std::tie(b.from, b.to, b.cost, b.middle);
-  });
-  auto last = std::unique(begin(r.shortcuts_), end(r.shortcuts_), [](const auto& a, const auto& b) {
-    return std::tie(a.from, a.to, a.cost, a.middle) == std::tie(b.from, b.to, b.cost, b.middle);
-  });
-  r.shortcuts_.resize(static_cast<unsigned int>(std::distance(begin(r.shortcuts_), last)));
-}
 
+
+// Remove duplicate shortcuts and update outgoing/incoming shortcut indices
+void deduplicate_shortcuts(ways::routing& r) {
+  if (r.shortcuts_.empty()) return;
+  
+  std::map<std::tuple<node_idx_t, node_idx_t, cost_t, node_idx_t>, size_t> unique_shortcuts;
+  vec<ways::routing::shortcut> deduplicated;
+  
+  // Find unique shortcuts and track their positions
+  for (uint32_t i = 0; i < r.shortcuts_.size(); ++i) {
+    auto const& sc = r.shortcuts_[i];
+    auto key = std::make_tuple(sc.from, sc.to, sc.cost, sc.middle);
+    
+    if (unique_shortcuts.find(key) == unique_shortcuts.end()) {
+      unique_shortcuts[key] = static_cast<uint32_t>(deduplicated.size());
+      deduplicated.push_back(sc);
+    }
+  }
+  
+  fmt::println("SHORTCUTS AFTER DEDUPLICATION: {} (removed {})", 
+               deduplicated.size(), r.shortcuts_.size() - deduplicated.size());
+  
+  // Replace shortcuts with deduplicated version
+  r.shortcuts_ = std::move(deduplicated);
+  
+  // Rebuild outgoing and incoming shortcut indices
+  r.outgoing_shortcuts_.clear();
+  r.incoming_shortcuts_.clear();
+  
+  for (uint32_t i = 0; i < r.shortcuts_.size(); ++i) {
+    auto const& sc = r.shortcuts_[i];
+    r.outgoing_shortcuts_[sc.from].emplace_back(i);
+    r.incoming_shortcuts_[sc.to].emplace_back(i);
+  }
+}
 
 // Dijkstra for witness search 
 bool witness_search(
@@ -297,23 +323,30 @@ bool witness_search(
     node_idx_t skip_u,
     cost_t max_cost
 ) {
-  // Min-heap: (cost, node)
-  using QEntry = std::pair<cost_t, node_idx_t>;
+  // Bounded local witness search with hop limit for performance
+  constexpr uint32_t MAX_HOPS = 10; // Limit search depth
+  
+  // Min-heap: (cost, node, hops)
+  using QEntry = std::tuple<cost_t, node_idx_t, uint32_t>;
   std::priority_queue<QEntry, std::vector<QEntry>, std::greater<>> q;
   std::unordered_map<node_idx_t, cost_t> dist;
 
-  q.emplace(0, v);
+  q.emplace(0, v, 0);
   dist[v] = 0;
 
   while (!q.empty()) {
-    auto [cost, u] = q.top();
+    auto [cost, u, hops] = q.top();
     q.pop();
 
     if (u == w) {
-      // Found path to w with cost <= max_cost
+      // Found witness path to w with acceptable cost
       return cost <= max_cost;
     }
-    if (cost > max_cost) continue;
+    
+    // Early termination conditions for bounded search
+    if (cost > max_cost || hops >= MAX_HOPS) {
+      continue;
+    }
     // For each neighbor of u
     for (auto way : r.node_ways_[u]) {
       for (auto n : r.way_nodes_[way]) {
@@ -330,9 +363,9 @@ bool witness_search(
         }
         if (edge_cost == kInfeasible) continue;
         cost_t new_cost = cost + edge_cost;
-        if (!dist.count(n) || new_cost < dist[n]) {
+        if (new_cost <= max_cost && (!dist.count(n) || new_cost < dist[n])) {
           dist[n] = new_cost;
-          q.emplace(new_cost, n);
+          q.emplace(new_cost, n, hops + 1);
         }
       }
     }
@@ -349,23 +382,30 @@ void ways::build_contraction_hierarchy() {
 
   // 2. Prepare containers for shortcuts
   r.shortcuts_.clear();
-  r.outgoing_shortcuts_.resize(n_nodes());
-  r.incoming_shortcuts_.resize(n_nodes());
+  r.outgoing_shortcuts_.clear();
+  r.incoming_shortcuts_.clear();
   
-  // vecvec is automatically initialized when resized
+  // unordered_map doesn't need pre-initialization - entries are created on demand
+  fmt::println("Using hash maps for shortcut storage - no pre-initialization needed");
 
-  // 3. Create random node ordering
-  std::vector<node_idx_t> contraction_order;
+  // 3. Create importance-based node ordering (degree-based heuristic)
+  // Nodes with lower degree are generally less important and should be contracted first
+  std::vector<std::pair<node_idx_t, size_t>> node_degree_pairs;
   for (node_idx_t u{0}; u < n_nodes(); ++u) {
-    contraction_order.push_back(u);
+    size_t degree = r.node_ways_[u].size();  // Simple degree calculation
+    node_degree_pairs.push_back({u, degree});
   }
   
-  // Random shuffle for node ordering
-  std::random_device rd;
-  std::mt19937 gen(rd());
-  std::shuffle(contraction_order.begin(), contraction_order.end(), gen);
+  // Sort by degree (ascending) - nodes with fewer connections contracted first
+  std::sort(node_degree_pairs.begin(), node_degree_pairs.end(), 
+            [](const auto& a, const auto& b) { return a.second < b.second; });
+  
+  std::vector<node_idx_t> contraction_order;
+  for (const auto& pair : node_degree_pairs) {
+    contraction_order.push_back(pair.first);
+  }
 
-  // 4. For each node u in random contraction order
+  // 4. For each node u in importance-based contraction order (low degree first)
   for (auto u : contraction_order) {
     // (A) Find all neighbors of u
     std::vector<node_idx_t> neighbors;
@@ -413,48 +453,16 @@ void ways::build_contraction_hierarchy() {
         // (C) Witness search: is there a v-w path avoiding u with cost ≤ shortcut_cost?
         bool witness = witness_search(r, v, w, u, shortcut_cost);
         if (!witness) {
-          // (D) Add shortcut with original edge sequence for path reconstruction
-          ways::routing::shortcut sc{v, w, shortcut_cost, u, {}};
+          // (D) Add shortcut (simplified structure)
+          ways::routing::shortcut sc{v, w, shortcut_cost, u};
           
-          // Store original edges: v->u and u->w for path reconstruction
-          // This allows unpacking shortcuts back to original road segments
-          // Find v->u edge
-          for (auto way : r.node_ways_[u]) {
-            auto nodes = r.way_nodes_[way];
-            for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
-              if ((nodes[idx] == v && nodes[idx + 1] == u)) {
-                sc.original_edges.push_back({way, static_cast<std::uint16_t>(idx), 
-                                           static_cast<std::uint16_t>(idx + 1), direction::kForward});
-                break;
-              } else if ((nodes[idx] == u && nodes[idx + 1] == v)) {
-                sc.original_edges.push_back({way, static_cast<std::uint16_t>(idx), 
-                                           static_cast<std::uint16_t>(idx + 1), direction::kBackward});
-                break;
-              }
-            }
-            if (!sc.original_edges.empty()) break;
-          }
-          
-          // Find u->w edge
-          for (auto way : r.node_ways_[u]) {
-            auto nodes = r.way_nodes_[way];
-            for (size_t idx = 0; idx + 1 < nodes.size(); ++idx) {
-              if ((nodes[idx] == u && nodes[idx + 1] == w)) {
-                sc.original_edges.push_back({way, static_cast<std::uint16_t>(idx), 
-                                           static_cast<std::uint16_t>(idx + 1), direction::kForward});
-                break;
-              } else if ((nodes[idx] == w && nodes[idx + 1] == u)) {
-                sc.original_edges.push_back({way, static_cast<std::uint16_t>(idx), 
-                                           static_cast<std::uint16_t>(idx + 1), direction::kBackward});
-                break;
-              }
-            }
-            if (sc.original_edges.size() == 2) break;
-          }
-          
+          // Add shortcut to main vector and store index references
+          auto const shortcut_idx = static_cast<uint32_t>(r.shortcuts_.size());
           r.shortcuts_.push_back(sc);
-          r.outgoing_shortcuts_[v].push_back(sc);
-          r.incoming_shortcuts_[w].push_back(sc);
+          
+          // Store indices in outgoing/incoming hash maps (automatically creates entries if needed)
+          r.outgoing_shortcuts_[v].emplace_back(shortcut_idx);
+          r.incoming_shortcuts_[w].emplace_back(shortcut_idx);
         }
       }
     }
@@ -475,7 +483,8 @@ void ways::build_contraction_hierarchy() {
   }
   fmt::println("DUPLICATE SHORTCUTS BEFORE DEDUPLICATION: {}", dupes);
 
-  //deduplicate_shortcuts(r);
+  // TEMPORARILY DISABLED: Remove duplicate shortcuts to reduce memory usage and improve performance  
+  // deduplicate_shortcuts(r);
 }
 
 }  // namespace osr

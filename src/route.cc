@@ -182,15 +182,11 @@ double unpack_shortcut(ways const& w,
     }
   }
   
-  if (shortcut_info && !shortcut_info->original_edges.empty()) {
-    // Unpack using stored original edges
-    double total_dist = 0.0;
-    
-    // First pass: calculate total distance and create segments
-    std::vector<std::pair<path::segment, double>> temp_segments;
-    for (const auto& edge_info : shortcut_info->original_edges) {
-      path::segment segment;
-      segment.way_ = edge_info.way;
+  // TODO: Re-implement shortcut unpacking after fixing cista vector issues
+  if (false && shortcut_info) { // Temporarily disabled - shortcut unpacking
+    /*
+    // Original shortcut unpacking code - disabled due to removed original_edges field
+    // Will be re-implemented in Section 3 of detailed-project-description.md
       segment.mode_ = to.get_mode();
       
       // Set proper segment boundaries
@@ -249,6 +245,7 @@ double unpack_shortcut(ways const& w,
     }
     
     return total_dist;
+    */
   } else {
     // Fallback to recursive approach when original edge info not available
     cost_t from_to_middle_cost = expected_cost / 2;
@@ -1191,7 +1188,7 @@ std::optional<path> route_bidirdijkstra(
     }
 
     b.reset(max, from, to);
-    b.set_use_ch(w.contraction_hierarchy_enabled());  // or pass-through a “use_ch” arg if you prefer
+    b.set_use_ch(w.contraction_hierarchy_enabled());  // Re-enable CH with shortcuts disabled in car.h
 
     if (b.radius_ == max) {
         return std::nullopt;

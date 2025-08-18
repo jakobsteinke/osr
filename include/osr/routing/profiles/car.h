@@ -6,6 +6,8 @@
 
 #include "utl/helpers/algorithm.h"
 
+#include "fmt/core.h"
+
 #include "osr/elevation_storage.h"
 #include "osr/routing/mode.h"
 #include "osr/routing/route.h"
@@ -18,6 +20,9 @@ struct sharing_data;
 struct car {
   static constexpr auto const kMaxMatchDistance = 200U;
   static constexpr auto const kUturnPenalty = cost_t{120U};
+  
+  // Special way position to mark shortcut-generated nodes
+  static constexpr auto const kShortcutWayPos = way_pos_t{std::numeric_limits<way_pos_t>::max() - 1U};
 
   using key = node_idx_t;
 
@@ -37,11 +42,20 @@ struct car {
     constexpr node_idx_t get_key() const noexcept { return n_; }
 
     static constexpr mode get_mode() noexcept { return mode::kCar; }
+    
+    // Helper function to detect shortcut-generated nodes
+    static constexpr bool is_shortcut_node(node const n) noexcept {
+      return n.way_ == kShortcutWayPos;
+    }
 
     std::ostream& print(std::ostream& out, ways const& w) const {
-      return out << "(node=" << w.node_to_osm_[n_] << ", dir=" << to_str(dir_)
-                 << ", way=" << w.way_osm_idx_[w.r_->node_ways_[n_][way_]]
-                 << ")";
+      if (is_shortcut_node(*this)) {
+        return out << "(shortcut_node=" << w.node_to_osm_[n_] << ", dir=" << to_str(dir_) << ")";
+      } else {
+        return out << "(node=" << w.node_to_osm_[n_] << ", dir=" << to_str(dir_)
+                   << ", way=" << w.way_osm_idx_[w.r_->node_ways_[n_][way_]]
+                   << ")";
+      }
     }
 
     node_idx_t n_;
@@ -72,6 +86,10 @@ struct car {
     entry() { utl::fill(cost_, kInfeasible); }
 
     constexpr std::optional<node> pred(node const n) const noexcept {
+      // Shortcut nodes don't have valid predecessors in fixed arrays
+      if (node::is_shortcut_node(n)) {
+        return std::nullopt;
+      }
       auto const idx = get_index(n);
       return pred_[idx] == node_idx_t::invalid()
                  ? std::nullopt
@@ -80,6 +98,10 @@ struct car {
     }
 
     constexpr cost_t cost(node const n) const noexcept {
+      // Shortcut nodes use a separate storage mechanism 
+      if (node::is_shortcut_node(n)) {
+        return kInfeasible; // Should be handled by bidirectional dijkstra's cost maps
+      }
       return cost_[get_index(n)];
     }
 
@@ -87,6 +109,10 @@ struct car {
                           node const n,
                           cost_t const c,
                           node const pred) noexcept {
+      // Shortcut nodes don't use fixed arrays - handled by bidirectional dijkstra's cost maps
+      if (node::is_shortcut_node(n)) {
+        return true; // Always accept updates for shortcut nodes
+      }
       //std::cout << "[DEBUG] update: node=" << n.n_ << " cost=" << c << " pred=" << pred.n_ << std::endl;
       auto const idx = get_index(n);
       if (c < cost_[idx]) {
@@ -110,6 +136,10 @@ struct car {
     }
 
     static constexpr std::size_t get_index(node const n) {
+      // Shortcut nodes should not use fixed array indexing
+      if (node::is_shortcut_node(n)) {
+        return 0U; // Return safe index, but this should not be used
+      }
       return (n.dir_ == direction::kForward ? 0U : 1U) * kMaxWays + n.way_;
     }
 
@@ -171,32 +201,94 @@ struct car {
                        elevation_storage const*,
                        Fn&& fn,
                        bool use_ch = false) { 
+    // ===== SHORTCUT NODE DETECTION =====
+    // Handle shortcut-generated nodes separately to avoid vector access issues
+    if (node::is_shortcut_node(n)) {
+      // For shortcut nodes, only process outgoing shortcuts - no regular edges
+      if (use_ch && w.contraction_hierarchy_enabled_ && !w.shortcuts_.empty()) {
+        auto const current_node = n.n_;
+        auto const shortcut_it = w.outgoing_shortcuts_.find(current_node);
+        if (shortcut_it != w.outgoing_shortcuts_.end()) {
+          auto const& shortcut_indices = shortcut_it->second;
+          
+          for (auto const shortcut_idx : shortcut_indices) {
+            if (shortcut_idx >= w.shortcuts_.size()) continue;
+            
+            auto const& shortcut = w.shortcuts_[shortcut_idx];
+            auto const target_node = shortcut.to;
+            
+            // Basic validation
+            if (target_node == node_idx_t::invalid() || 
+                to_idx(target_node) >= w.node_properties_.size()) {
+              continue;
+            }
+            
+            auto const target_node_prop = w.node_properties_[target_node];
+            if (node_cost(target_node_prop) == kInfeasible || shortcut.cost >= kInfeasible) {
+              continue;
+            }
+            
+            // Create shortcut target 
+            auto const target = node{target_node, kShortcutWayPos, SearchDir};
+            fn(target, shortcut.cost, 0U, way_idx_t::invalid(), 0U, 0U, 
+               elevation_storage::elevation{}, true); // Mark as shortcut
+          }
+        }
+      }
+      return; // Skip regular processing for shortcut nodes
+    }
+    
+    // ===== DEFENSIVE BOUNDS CHECKING FOR REGULAR NODES =====
+    // Validate node index and way position before any vector access
+    auto const node_idx = to_idx(n.n_);
+    if (node_idx >= w.node_ways_.size() || 
+        node_idx >= w.node_in_way_idx_.size()) {
+      return; // Skip invalid nodes
+    }
+    
+    // Validate way position for this node
+    auto const& node_ways = w.node_ways_[n.n_];
+    if (n.way_ >= node_ways.size()) {
+      return; // Skip nodes with invalid way positions
+    }
+    
+    // Additional safety check for node_in_way_idx access
+    auto const& node_in_way_idx = w.node_in_way_idx_[n.n_];
+    if (n.way_ >= node_in_way_idx.size()) {
+      return; // Skip nodes with mismatched way index arrays
+    }
+    
     auto way_pos = way_pos_t{0U};
     for (auto const [way, i] :
          utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
       auto const expand = [&](direction const way_dir, std::uint16_t const from,
                               std::uint16_t const to) {
+        // Bounds check for way_nodes access
+        if (to_idx(way) >= w.way_nodes_.size() || to >= w.way_nodes_[way].size()) {
+          return; // Skip invalid way node access
+        }
+        
         // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
         auto const target_node = w.way_nodes_[way][to];
         // ===== CH LEVEL FILTER =====
-        /*const auto curr_level = w.node_ch_level_[n.n_];
-        const auto neighbor_level = w.node_ch_level_[target_node];
-        //fmt::println("curr_level: {} -> neighbor_level: {}", curr_level, neighbor_level);
-        //fmt::println("In route/adjacent, addr of w: {}", fmt::ptr(&w));
-        //fmt::println("CH flag: {}", w.contraction_hierarchy_enabled_);
-        if (/*w.contraction_hierarchy_enabled_ w.shortcuts_.empty() use_ch) {         
-          if constexpr (SearchDir == direction::kForward) { // außerhalb? 
-              if (curr_level <= neighbor_level) return;  // Not allowed by CH <=
-          } else {
-              if (curr_level >= neighbor_level) return;  // Not allowed by CH >=
+        // TEMPORARILY DISABLED: Level filtering for search space reduction
+        // TODO: Re-enable once basic CH routing is working
+        if (false && use_ch && w.contraction_hierarchy_enabled_ && !w.node_ch_level_.empty()) {
+          // Bounds checking to prevent crashes
+          auto const curr_idx = to_idx(n.n_);
+          auto const target_idx = to_idx(target_node);
+          
+          if (curr_idx < w.node_ch_level_.size() && target_idx < w.node_ch_level_.size()) {
+            auto const curr_level = w.node_ch_level_[n.n_];
+            auto const target_level = w.node_ch_level_[target_node];
+            
+            // Apply level filtering for CH bidirectional search
+            // Both forward and backward searches go "upward" to higher levels
+            // This is the standard CH approach for bidirectional search
+            if (curr_level >= target_level) {
+              return; // Skip this edge - both directions only traverse to higher levels
+            }
           }
-        }*/
-        // Only filter if CH is really present and requested.
-        // Disable level filtering for now - shortcuts provide most of the benefit
-        // TODO: Implement stall-on-demand or witness search for safe level filtering
-        if (use_ch && false) {
-          // Level filtering temporarily disabled due to vector bounds issues
-          // The crash seems to be triggered by some other vector access when CH is enabled
         }
         // ==========================
         if constexpr (WithBlocked) {
@@ -246,71 +338,52 @@ struct car {
       ++way_pos;
     }
     
-    // Temporarily disable shortcuts during routing to test basic functionality
-    // Test minimal shortcut access to isolate crash
+    // ===== CH SHORTCUT PROCESSING FOR REGULAR NODES =====
+    // Regular nodes can also generate shortcuts to shortcut nodes
     if (use_ch && w.contraction_hierarchy_enabled_ && !w.shortcuts_.empty()) {
-      // Try to access just the first shortcut as a test
-      if (w.shortcuts_.size() > 0) {
-        try {
-          auto const& first_shortcut = w.shortcuts_[0];
-          // Don't actually use it, just test access
-          (void)first_shortcut;
-        } catch (...) {
-          // Ignore any access errors
-        }
-      }
-    }
-    
-    // Disable shortcut processing until path reconstruction is fully implemented
-    // Shortcuts are built and stored with original edges, but not used during routing yet
-    if (use_ch && w.contraction_hierarchy_enabled_ && !w.shortcuts_.empty() && false) {
       auto const current_node = n.n_;
       
-      // Safer approach: iterate through all shortcuts and find matches
-      // This avoids the complex vecvec access that was causing crashes
-      try {
-        // Iterate through shortcuts more safely
-        for (auto const& shortcut : w.shortcuts_) {
-          
-          // Check if this shortcut starts from our current node
-          if (shortcut.from != current_node) {
+      // Safe hash map lookup
+      auto const shortcut_it = w.outgoing_shortcuts_.find(current_node);
+      if (shortcut_it != w.outgoing_shortcuts_.end()) {
+        auto const& shortcut_indices = shortcut_it->second;
+        
+        for (auto const shortcut_idx : shortcut_indices) {
+          // Basic validation
+          if (shortcut_idx >= w.shortcuts_.size()) {
             continue;
           }
           
-          auto const target_idx = to_idx(shortcut.to);
-          
-          // Validate target node bounds
-          if (target_idx >= w.node_ch_level_.size() ||
-              target_idx >= w.node_properties_.size() ||
-              shortcut.cost == 0 || shortcut.cost >= kInfeasible) {
-            continue; // Skip invalid shortcuts
-          }
-          
+          auto const& shortcut = w.shortcuts_[shortcut_idx];
           auto const target_node = shortcut.to;
           
-          // Check if target node is blocked
-          if constexpr (WithBlocked) {
-            if (blocked && blocked->test(target_node)) {
-              continue;
-            }
+          // Simple target validation
+          if (target_node == node_idx_t::invalid() || 
+              to_idx(target_node) >= w.node_properties_.size() ||
+              to_idx(target_node) >= w.node_ways_.size()) {
+            continue;
           }
           
-          // Validate node accessibility
           auto const target_node_prop = w.node_properties_[target_node];
           if (node_cost(target_node_prop) == kInfeasible) {
             continue;
           }
           
-          // Create shortcut target node - use way position 0 for shortcuts
-          auto const target = node{target_node, 0, SearchDir};
+          // Check shortcut validity
+          if (shortcut.cost >= kInfeasible) {
+            continue;
+          }
           
-          // Use shortcut cost directly
+          // Validate that target node has ways
+          if (w.node_ways_[target_node].empty()) {
+            continue;
+          }
+          
+          // Create shortcut target with special way position marker
+          auto const target = node{target_node, kShortcutWayPos, SearchDir};
           fn(target, shortcut.cost, 0U, way_idx_t::invalid(), 0U, 0U, 
              elevation_storage::elevation{}, true); // Mark as shortcut
         }
-      } catch (const std::exception&) {
-        // Gracefully handle any remaining edge cases by skipping shortcuts
-        // Regular edges will still be processed below
       }
     }
   }

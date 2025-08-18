@@ -161,6 +161,54 @@ struct bidirectional_dijkstra {
         },
         use_ch_  // Re-enable CH flag with safer level filtering
       );
+      
+      // ===== DEDICATED CH SHORTCUT PROCESSING =====
+      // DISABLED - Now handled properly in car.h adjacent() function with node type detection
+      if (false && use_ch_ && r.contraction_hierarchy_enabled_ && !r.shortcuts_.empty()) {
+        auto const current_node = curr.get_node();
+        auto const shortcut_it = r.outgoing_shortcuts_.find(current_node);
+        if (shortcut_it != r.outgoing_shortcuts_.end()) {
+          auto const& shortcut_indices = shortcut_it->second;
+          
+          for (auto const shortcut_idx : shortcut_indices) {
+            if (shortcut_idx >= r.shortcuts_.size()) continue;
+            
+            auto const& shortcut = r.shortcuts_[shortcut_idx];
+            auto const target_node = shortcut.to;
+            auto const total = curr_cost + shortcut.cost;
+            
+            // Basic validation and cost check
+            if (total >= adjusted_max || target_node == node_idx_t::invalid() ||
+                to_idx(target_node) >= r.node_properties_.size()) {
+              continue;
+            }
+            
+            // Validate target node accessibility
+            auto const target_node_prop = r.node_properties_[target_node];
+            if (Profile::node_cost(target_node_prop) == kInfeasible) {
+              continue;
+            }
+            
+            // Create shortcut target node with special way position marker
+            auto const target = typename Profile::node{target_node, Profile::kShortcutWayPos, SearchDir};
+            
+            // Process shortcut as if it were a regular neighbor
+            if (total < max && 
+                costs[target.get_key()].update(l, target, static_cast<cost_t>(total), curr)) {
+              
+              auto next = label{target, static_cast<cost_t>(total)};
+              next.track(l, r, way_idx_t::invalid(), target.get_node(), true); // Mark as shortcut
+              pq.push(std::move(next));
+              
+              if constexpr (kDebug) {
+                std::cout << "  SHORTCUT -> ";
+                target.print(std::cout, w);
+                std::cout << " cost=" << shortcut.cost << " -> PUSH\n";
+              }
+            }
+          }
+        }
+      }
 
     // --- Meeting point handling (same as A*, just no heuristic!) ---
     auto const evaluate_meetpoint = [&](cost_t cost, cost_t other_cost,

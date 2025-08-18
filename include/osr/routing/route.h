@@ -53,6 +53,12 @@ bidirectional<Profile>& get_bidirectional();
 template <typename Profile>
 dijkstra<Profile>& get_dijkstra();
 
+struct ch_dijkstra;
+struct ch_data;
+
+ch_dijkstra& get_ch_dijkstra();
+ch_data& get_ch_data();
+
 std::vector<std::optional<path>> route(
     ways const&,
     lookup const&,
@@ -83,6 +89,7 @@ std::optional<path> route(ways const&,
                           routing_algorithm = routing_algorithm::kDijkstra);
 
 std::optional<path> route(ways const&,
+                          lookup const&,
                           search_profile,
                           location const& from,
                           location const& to,
@@ -92,7 +99,8 @@ std::optional<path> route(ways const&,
                           direction,
                           bitvec<node_idx_t> const* blocked = nullptr,
                           sharing_data const* sharing = nullptr,
-                          elevation_storage const* = nullptr);
+                          elevation_storage const* = nullptr,
+                          routing_algorithm = routing_algorithm::kDijkstra);
 
 std::vector<std::optional<path>> route(
     ways const&,

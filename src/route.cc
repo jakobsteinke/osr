@@ -15,6 +15,9 @@
 #include "osr/elevation_storage.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
+#include "osr/routing/ch_dijkstra.h"
+#include "osr/routing/ch_data.h"
+#include "osr/routing/ch_preprocessing.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profiles/bike.h"
 #include "osr/routing/profiles/bike_sharing.h"
@@ -43,6 +46,7 @@ routing_algorithm to_algorithm(std::string_view s) {
     case cista::hash("dijkstra"): return routing_algorithm::kDijkstra;
     case cista::hash("a_star"): return routing_algorithm::kAStar;
     case cista::hash("bidirectional"): return routing_algorithm::kAStarBi;
+    case cista::hash("ch_dijkstra"): return routing_algorithm::kCHDijkstra;
   }
   throw utl::fail("unknown routing algorithm: {}", s);
 }
@@ -725,6 +729,136 @@ std::optional<path> route_bidirectional(ways const& w,
   throw utl::fail("not implemented");
 }
 
+std::optional<path> route_ch(ways const& w,
+                             lookup const& l,
+                             location const& from,
+                             location const& to,
+                             cost_t const max,
+                             direction const dir,
+                             double const max_match_distance,
+                             bitvec<node_idx_t> const* blocked,
+                             sharing_data const* sharing,
+                             elevation_storage const* elevations) {
+  
+  std::cout << "ROUTE_CH CALLED!" << std::endl;
+  
+  auto& ch_dijkstra_instance = get_ch_dijkstra();
+  auto& ch_data_instance = get_ch_data();
+  
+  // Preprocess if not done yet
+  if (ch_data_instance.node_levels_.empty()) {
+    ch_data_instance = ch_preprocessing::preprocess(w);
+  }
+  
+  // Only support car profile for CH
+  auto const from_match = l.match<car>(from, false, dir, max_match_distance, blocked);
+  auto const to_match = l.match<car>(to, true, dir, max_match_distance, blocked);
+  
+  if (from_match.empty() || to_match.empty()) {
+    return std::nullopt;
+  }
+  
+  // Direct path check
+  if (auto const direct = try_direct(from, to); direct.has_value()) {
+    return *direct;
+  }
+  
+  ch_dijkstra_instance.reset(max);
+  
+  // Add start nodes
+  std::cout << "CH: Adding start nodes, from_match.size() = " << from_match.size() << std::endl;
+  for (auto const& start : from_match) {
+    auto const start_way = start.way_;
+    std::cout << "CH: Processing start way " << start_way << std::endl;
+    for (auto const* nc : {&start.left_, &start.right_}) {
+      if (nc->node_ == node_idx_t::invalid()) {
+        std::cout << "CH: Skipping invalid node" << std::endl;
+        continue;
+      }
+      std::cout << "CH: Resolving start node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
+      car::resolve_start_node(
+          *w.r_, start_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, dir, 
+          [&](car::node const n) {
+            std::cout << "CH: Found resolved node, adding to start" << std::endl;
+            ch_dijkstra_instance.add_start(
+                w, car::label{n, static_cast<cost_t>(nc->cost_)}, &ch_data_instance);
+          });
+    }
+  }
+  
+  // Add end nodes
+  std::cout << "CH: Adding end nodes, to_match.size() = " << to_match.size() << std::endl;
+  for (auto const& end : to_match) {
+    auto const end_way = end.way_;
+    std::cout << "CH: Processing end way " << end_way << std::endl;
+    for (auto const* nc : {&end.left_, &end.right_}) {
+      if (nc->node_ == node_idx_t::invalid()) {
+        std::cout << "CH: Skipping invalid end node" << std::endl;
+        continue;
+      }
+      std::cout << "CH: Resolving end node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
+      car::resolve_start_node(
+          *w.r_, end_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, opposite(dir),
+          [&](car::node const n) {
+            std::cout << "CH: Found resolved end node, adding to end" << std::endl;
+            ch_dijkstra_instance.add_end(
+                w, car::label{n, static_cast<cost_t>(nc->cost_)}, &ch_data_instance);
+          });
+    }
+  }
+  
+  // Run CH Dijkstra
+  bool success = false;
+  if (blocked == nullptr) {
+    success = ch_dijkstra_instance.run<false>(
+        w, *w.r_, max, blocked, &ch_data_instance, sharing, elevations);
+  } else {
+    success = ch_dijkstra_instance.run<true>(
+        w, *w.r_, max, blocked, &ch_data_instance, sharing, elevations);
+  }
+  
+  if (!success || ch_dijkstra_instance.best_cost_ == std::numeric_limits<ch_dijkstra::internal_cost_t>::max()) {
+    return std::nullopt;
+  }
+  
+  // Reconstruct path with shortcut unpacking
+  auto p = path{.cost_ = static_cast<cost_t>(std::min(ch_dijkstra_instance.best_cost_, static_cast<ch_dijkstra::internal_cost_t>(std::numeric_limits<cost_t>::max())))};
+  
+  // Simple path reconstruction - just connect the two nodes directly for now
+  // TODO: Implement proper shortcut unpacking
+  std::vector<car::node> full_path;
+  full_path.push_back(ch_dijkstra_instance.forward_meet_node_);
+  if (ch_dijkstra_instance.backward_meet_node_.n_ != ch_dijkstra_instance.forward_meet_node_.n_) {
+    full_path.push_back(ch_dijkstra_instance.backward_meet_node_);
+  }
+  
+  // Build path segments
+  if (full_path.size() >= 2) {
+    for (size_t i = 0; i < full_path.size() - 1; ++i) {
+      auto const& from_node = full_path[i];
+      auto const& to_node = full_path[i + 1];
+      
+      // For now, create a simple segment without detailed polyline
+      // TODO: Properly handle shortcut unpacking
+      auto seg = path::segment{
+          .from_ = from_node.n_,
+          .to_ = to_node.n_,
+          .way_ = way_idx_t::invalid(),
+          .dist_ = 0,
+          .mode_ = mode::kCar
+      };
+      
+      // Add simple straight line polyline
+      seg.polyline_.emplace_back(w.get_node_pos(from_node.n_));
+      seg.polyline_.emplace_back(w.get_node_pos(to_node.n_));
+      
+      p.segments_.push_back(std::move(seg));
+    }
+  }
+  
+  return p;
+}
+
 std::vector<std::optional<path>> route(
     ways const& w,
     lookup const& l,
@@ -874,6 +1008,82 @@ std::vector<std::optional<path>> route(
   throw utl::fail("not implemented");
 }
 
+std::optional<path> route_ch_with_matches(ways const& w,
+                                          lookup const& l,
+                                          location const& from,
+                                          location const& to,
+                                          match_view_t from_match,
+                                          match_view_t to_match,
+                                          cost_t const max,
+                                          direction const dir,
+                                          bitvec<node_idx_t> const* blocked,
+                                          sharing_data const* sharing,
+                                          elevation_storage const* elevations) {
+  std::cout << "route_ch_with_matches called!" << std::endl;
+  std::cout << "From matches: " << from_match.size() << ", To matches: " << to_match.size() << std::endl;
+  
+  auto from_pos = from.pos_;
+  auto to_pos = to.pos_;
+  auto distance = geo::distance(from_pos, to_pos);
+  std::cout << "Distance between from/to: " << distance << " meters" << std::endl;
+  
+  auto& dijkstra = get_ch_dijkstra();
+  auto& ch_data = get_ch_data();
+  auto const& r = *w.r_;
+
+  dijkstra.reset(max);
+
+  for (auto const [i, start] : utl::enumerate(from_match)) {
+    for (auto const* nc : {&start.left_, &start.right_}) {
+      if (nc->valid() && nc->cost_ < max) {
+        car::resolve_all(r, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, 
+                         [&](car::node const start_node) {
+          dijkstra.add_start(w, car::label{start_node, nc->cost_}, &ch_data);
+        });
+      }
+    }
+  }
+
+  for (auto const [i, end] : utl::enumerate(to_match)) {
+    for (auto const* nc : {&end.left_, &end.right_}) {
+      if (nc->valid() && nc->cost_ < max) {
+        car::resolve_all(r, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, 
+                         [&](car::node const end_node) {
+          dijkstra.add_end(w, car::label{end_node, nc->cost_}, &ch_data);
+        });
+      }
+    }
+  }
+
+  auto const found = blocked ? dijkstra.run<true>(w, r, max, blocked, &ch_data, 
+                                                  sharing, elevations)
+                             : dijkstra.run<false>(w, r, max, nullptr, &ch_data, 
+                                                   sharing, elevations);
+  
+  if (!found) {
+    std::cout << "route_ch_with_matches: no path found" << std::endl;
+    return std::nullopt;
+  }
+
+  // std::cout << "DEBUG: route_ch_with_matches: found path with cost " << dijkstra.best_cost_ << std::endl;
+  
+  // Simple path reconstruction for CH - just return basic path structure
+  auto p = std::optional<path>{path{
+    .cost_ = static_cast<cost_t>(std::min(dijkstra.best_cost_, static_cast<ch_dijkstra::internal_cost_t>(std::numeric_limits<cost_t>::max()))),
+    .dist_ = 0.0,  // TODO: calculate actual distance
+    .segments_ = {},
+    .uses_elevator_ = false
+  }};
+  
+  if (p.has_value()) {
+    std::cout << "route_ch_with_matches: reconstructed path with cost " << p->cost_ << std::endl;
+  } else {
+    std::cout << "route_ch_with_matches: path reconstruction failed" << std::endl;
+  }
+  
+  return p;
+}
+
 std::optional<path> route(ways const& w,
                           lookup const& l,
                           search_profile const profile,
@@ -885,39 +1095,52 @@ std::optional<path> route(ways const& w,
                           direction const dir,
                           bitvec<node_idx_t> const* blocked,
                           sharing_data const* sharing,
-                          elevation_storage const* elevations) {
+                          elevation_storage const* elevations,
+                          routing_algorithm const algorithm) {
   if (from_match.empty() || to_match.empty()) {
     return std::nullopt;
   }
 
-  auto const r =
-      [&]<typename Profile>(dijkstra<Profile>& d) -> std::optional<path> {
-    return route_dijkstra(w, l, d, from, to, from_match, to_match, max, dir,
-                          blocked, sharing, elevations);
-  };
+  switch (algorithm) {
+    case routing_algorithm::kCHDijkstra:
+      std::cout << "SWITCH CASE: kCHDijkstra called in match-based route!" << std::endl;
+      if (profile != search_profile::kCar) {
+        throw utl::fail("CH routing only supports car profile");
+      }
+      return route_ch_with_matches(w, l, from, to, from_match, to_match, max, dir,
+                                   blocked, sharing, elevations);
+    
+    default: {
+      auto const r =
+          [&]<typename Profile>(dijkstra<Profile>& d) -> std::optional<path> {
+        return route_dijkstra(w, l, d, from, to, from_match, to_match, max, dir,
+                              blocked, sharing, elevations);
+      };
 
-  switch (profile) {
-    case search_profile::kFoot:
-      return r(get_dijkstra<foot<false, elevator_tracking>>());
-    case search_profile::kWheelchair:
-      return r(get_dijkstra<foot<true, elevator_tracking>>());
-    case search_profile::kBike:
-      return r(get_dijkstra<bike<kElevationNoCost>>());
-    case search_profile::kBikeElevationLow:
-      return r(get_dijkstra<bike<kElevationLowCost>>());
-    case search_profile::kBikeElevationHigh:
-      return r(get_dijkstra<bike<kElevationHighCost>>());
-    case search_profile::kCar: return r(get_dijkstra<car>());
-    case search_profile::kCarParking:
-      return r(get_dijkstra<car_parking<false>>());
-    case search_profile::kCarParkingWheelchair:
-      return r(get_dijkstra<car_parking<true>>());
-    case search_profile::kBikeSharing: return r(get_dijkstra<bike_sharing>());
-    case search_profile::kCarSharing:
-      return r(get_dijkstra<car_sharing<track_node_tracking>>());
+      switch (profile) {
+        case search_profile::kFoot:
+          return r(get_dijkstra<foot<false, elevator_tracking>>());
+        case search_profile::kWheelchair:
+          return r(get_dijkstra<foot<true, elevator_tracking>>());
+        case search_profile::kBike:
+          return r(get_dijkstra<bike<kElevationNoCost>>());
+        case search_profile::kBikeElevationLow:
+          return r(get_dijkstra<bike<kElevationLowCost>>());
+        case search_profile::kBikeElevationHigh:
+          return r(get_dijkstra<bike<kElevationHighCost>>());
+        case search_profile::kCar: return r(get_dijkstra<car>());
+        case search_profile::kCarParking:
+          return r(get_dijkstra<car_parking<false>>());
+        case search_profile::kCarParkingWheelchair:
+          return r(get_dijkstra<car_parking<true>>());
+        case search_profile::kBikeSharing: return r(get_dijkstra<bike_sharing>());
+        case search_profile::kCarSharing:
+          return r(get_dijkstra<car_sharing<track_node_tracking>>());
+      }
+      
+      throw utl::fail("not implemented");
+    }
   }
-
-  throw utl::fail("not implemented");
 }
 
 std::optional<path> route(ways const& w,
@@ -949,6 +1172,15 @@ std::optional<path> route(ways const& w,
       return route_bidirectional(w, l, profile, from, to, max, dir,
                                  max_match_distance, blocked, sharing,
                                  elevations);
+    case routing_algorithm::kCHDijkstra:
+      std::cout << "SWITCH CASE: kCHDijkstra called!" << std::endl;
+      // CH only supports car profile
+      if (profile != search_profile::kCar) {
+        std::cout << "CH ERROR: Non-car profile!" << std::endl;
+        throw utl::fail("CH routing only supports car profile");
+      }
+      return route_ch(w, l, from, to, max, dir, max_match_distance, 
+                     blocked, sharing, elevations);
   }
   throw utl::fail("not implemented");
 }
@@ -967,6 +1199,23 @@ dijkstra<Profile>& get_dijkstra() {
   static auto s = boost::thread_specific_ptr<dijkstra<Profile>>{};
   if (s.get() == nullptr) {
     s.reset(new dijkstra<Profile>{});
+  }
+  return *s.get();
+}
+
+ch_dijkstra& get_ch_dijkstra() {
+  static auto s = boost::thread_specific_ptr<ch_dijkstra>{};
+  if (s.get() == nullptr) {
+    std::cout << "CREATING NEW CH_DIJKSTRA INSTANCE!" << std::endl;
+    s.reset(new ch_dijkstra{});
+  }
+  return *s.get();
+}
+
+ch_data& get_ch_data() {
+  static auto s = boost::thread_specific_ptr<ch_data>{};
+  if (s.get() == nullptr) {
+    s.reset(new ch_data{});
   }
   return *s.get();
 }

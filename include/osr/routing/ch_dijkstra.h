@@ -20,7 +20,7 @@ struct ch_dijkstra {
   using hash = car::hash;
   using internal_cost_t = std::uint32_t;  // Use larger type for internal calculations
 
-  static constexpr bool kDebug = false;  // Disable debug for cleaner output
+  static constexpr bool kDebug = true;  // Enable minimal debug for small test
 
   // Custom label for CH that uses larger cost type
   struct ch_label {
@@ -209,18 +209,16 @@ struct ch_dijkstra {
     // Interleaved bidirectional search like bidirectional.h
     while (!pq_forward_.empty() || !pq_backward_.empty()) {
       
+      bool forward_step_ok = true;
+      bool backward_step_ok = true;
+      
       // Forward search step
       if (!pq_forward_.empty()) {
         if (kDebug) {
           std::cout << "CH: Running forward step, PQ size: " << pq_forward_.size() << std::endl;
         }
-        if (!run_single_step<true, WithBlocked>(w, r, max, blocked, ch, sharing, elevations,
-                                                forward_processed, forward_filtered)) {
-          if (kDebug) {
-            std::cout << "CH: Forward step returned false - terminating" << std::endl;
-          }
-          break; // Termination condition met
-        }
+        forward_step_ok = run_single_step<true, WithBlocked>(w, r, max, blocked, ch, sharing, elevations,
+                                                            forward_processed, forward_filtered);
       }
       
       // Backward search step  
@@ -228,22 +226,53 @@ struct ch_dijkstra {
         if (kDebug) {
           std::cout << "CH: Running backward step, PQ size: " << pq_backward_.size() << std::endl;
         }
-        if (!run_single_step<false, WithBlocked>(w, r, max, blocked, ch, sharing, elevations,
-                                                 backward_processed, backward_filtered)) {
-          if (kDebug) {
-            std::cout << "CH: Backward step returned false - terminating" << std::endl;
-          }
-          break; // Termination condition met
+        backward_step_ok = run_single_step<false, WithBlocked>(w, r, max, blocked, ch, sharing, elevations,
+                                                              backward_processed, backward_filtered);
+      }
+      
+      // Check termination condition after both steps according to CH theory
+      // Terminate when both queue minimums exceed best cost
+      if (best_cost_ != std::numeric_limits<internal_cost_t>::max() &&
+          min_forward_cost_ > best_cost_ && min_backward_cost_ > best_cost_) {
+        if (kDebug) {
+          std::cout << "CH: Terminating - both searches exceed best_cost: " 
+                   << "fwd_min=" << min_forward_cost_ << ", bwd_min=" << min_backward_cost_ 
+                   << ", best=" << best_cost_ << std::endl;
         }
+        break;
+      }
+      
+      // Also terminate if either search explicitly requests termination
+      if (!forward_step_ok || !backward_step_ok) {
+        if (kDebug) {
+          std::cout << "CH: Terminating - search step returned false" << std::endl;
+        }
+        break;
       }
     }
 
-    if (kDebug) {
-      std::cout << "CH SEARCH COMPLETE:\n";
-      std::cout << "  Forward processed: " << forward_processed << ", filtered: " << forward_filtered << "\n";
-      std::cout << "  Backward processed: " << backward_processed << ", filtered: " << backward_filtered << "\n";
-      std::cout << "  Best cost: " << (best_cost_ == std::numeric_limits<internal_cost_t>::max() ? "NONE" : std::to_string(best_cost_)) << "\n";
+    // Always log search completion for analysis
+    bool success = best_cost_ != std::numeric_limits<internal_cost_t>::max();
+    std::cout << "CH SEARCH " << (success ? "SUCCESS" : "FAILED") << ":\n";
+    std::cout << "  Forward processed: " << forward_processed << ", filtered: " << forward_filtered << "\n";
+    std::cout << "  Backward processed: " << backward_processed << ", filtered: " << backward_filtered << "\n";
+    std::cout << "  Best cost: " << (success ? std::to_string(best_cost_) : "NONE") << "\n";
+    if (success) {
       std::cout << "  Meet point: " << meet_point_.v_ << "\n";
+    } else {
+      // Analyze failure reasons
+      std::cout << "  Failure analysis:\n";
+      std::cout << "    Final forward min cost: " << min_forward_cost_ << "\n";
+      std::cout << "    Final backward min cost: " << min_backward_cost_ << "\n";
+      std::cout << "    Forward queue empty: " << (pq_forward_.empty() ? "YES" : "NO") << "\n";
+      std::cout << "    Backward queue empty: " << (pq_backward_.empty() ? "YES" : "NO") << "\n";
+      
+      if (forward_filtered > forward_processed * 2) {
+        std::cout << "    High forward filtering ratio suggests level filtering issues\n";
+      }
+      if (backward_filtered > backward_processed * 2) {
+        std::cout << "    High backward filtering ratio suggests level filtering issues\n";
+      }
     }
 
     return best_cost_ != std::numeric_limits<internal_cost_t>::max();
@@ -280,30 +309,17 @@ struct ch_dijkstra {
     
     processed_count++;
     
+    // Update minimum cost tracking for termination
+    if constexpr (IsForward) {
+      min_forward_cost_ = actual_cost;
+    } else {
+      min_backward_cost_ = actual_cost;
+    }
+    
     // Check for meetpoints with the other search
     check_meetpoint(w, curr, actual_cost, other_costs, ch, IsForward);
     
-    // Check termination condition - both PQ tops must exceed best cost
-    if (best_cost_ != std::numeric_limits<internal_cost_t>::max()) {
-      // Get minimum cost in each queue similar to bidirectional.h approach
-      auto const top_forward = pq_forward_.empty() ? 
-          std::numeric_limits<internal_cost_t>::max() : 
-          pq_forward_.buckets_[pq_forward_.get_next_bucket()].empty() ?
-              std::numeric_limits<internal_cost_t>::max() :
-              pq_forward_.buckets_[pq_forward_.get_next_bucket()].back().cost();
-      
-      auto const top_backward = pq_backward_.empty() ? 
-          std::numeric_limits<internal_cost_t>::max() : 
-          pq_backward_.buckets_[pq_backward_.get_next_bucket()].empty() ?
-              std::numeric_limits<internal_cost_t>::max() :
-              pq_backward_.buckets_[pq_backward_.get_next_bucket()].back().cost();
-          
-      if (top_forward > best_cost_ && top_backward > best_cost_) {
-        std::cout << "Terminating: both searches exceed best_cost " << best_cost_ 
-                  << " (fwd_top=" << top_forward << ", bwd_top=" << top_backward << ")\n";
-        return false; // Terminate search
-      }
-    }
+    // Termination is now handled at the main loop level for symmetric checking
     
     // Expand current node
     if constexpr (IsForward) {
@@ -335,16 +351,15 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Level filtering: forward search with relaxed upward requirement
+          // Level filtering: forward search with upward requirement
           if (ch) {
             car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
             car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
             auto curr_level = ch->get_level(curr_key);
             auto neighbor_level = ch->get_level(neighbor_key);
             
-            // Allow upward edges + limited downward exploration for connectivity
-            bool allow_edge = curr_level <= neighbor_level || 
-                             (neighbor_level + 100 >= curr_level);  // Allow small level drops
+            // Forward search: traverse upward edges (lower to higher level)
+            bool allow_edge = curr_level < neighbor_level;
             
             if (!allow_edge) {
               filtered_count++;
@@ -370,7 +385,9 @@ struct ch_dijkstra {
         }
         for (auto const& sc : *shortcuts) {
           // Level filtering for shortcuts: only traverse upward edges
-          if (ch->is_upward_edge(curr_key, sc.to_)) {
+          auto curr_level = ch->get_level(curr_key);
+          auto to_level = ch->get_level(sc.to_);
+          if (curr_level < to_level) {
             if (kDebug) {
               std::cout << "  SHORTCUT (" << curr.n_ << "," << curr.way_ << ")->(" 
                        << sc.to_.n_ << "," << sc.to_.way_ << ") cost=" << sc.cost_ 
@@ -410,17 +427,16 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Level filtering: backward search with relaxed upward requirement in reverse
+          // Level filtering: backward search with downward/lateral requirement
           if (ch) {
             car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
             car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
             auto curr_level = ch->get_level(curr_key);
             auto neighbor_level = ch->get_level(neighbor_key);
             
-            // For backward search: allow edges where neighbor_level <= curr_level (upward in reverse)
-            // + limited downward exploration for connectivity
-            bool allow_edge = neighbor_level <= curr_level || 
-                             (curr_level + 100 >= neighbor_level);  // Allow small level drops
+            // Backward search: traverse downward and lateral edges
+            // Allow edges where curr_level >= neighbor_level (includes lateral edges)
+            bool allow_edge = curr_level >= neighbor_level;
             
             if (!allow_edge) {
               filtered_count++;
@@ -442,8 +458,10 @@ struct ch_dijkstra {
       auto const* shortcuts = ch->get_backward_shortcuts(curr_key);
       if (shortcuts) {
         for (auto const& sc : *shortcuts) {
-          // Level filtering for shortcuts: backward search traverses upward edges in reverse graph
-          if (ch->is_upward_edge(curr_key, sc.from_)) {
+          // Level filtering for shortcuts: backward search traverses upward edges in reverse
+          auto curr_level = ch->get_level(curr_key);
+          auto from_level = ch->get_level(sc.from_);
+          if (curr_level > from_level) {
             if (kDebug) {
               std::cout << "  SHORTCUT (" << curr.n_ << "," << curr.way_ << ")->(" 
                        << sc.from_.n_ << "," << sc.from_.way_ << ") cost=" << sc.cost_ 
@@ -675,6 +693,10 @@ struct ch_dijkstra {
   node_idx_t meet_point_{node_idx_t::invalid()};
   node forward_meet_node_{node::invalid()};
   node backward_meet_node_{node::invalid()};
+  
+  // Track minimum costs for termination condition
+  internal_cost_t min_forward_cost_{0};
+  internal_cost_t min_backward_cost_{0};
 };
 
 }  // namespace osr

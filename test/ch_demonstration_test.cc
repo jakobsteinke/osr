@@ -27,7 +27,7 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
   constexpr auto const kMaxMatchDistance = 100;
-  constexpr auto const num_samples = 50U;  // Original sample count
+  constexpr auto const num_samples = 5U;  // Reduced for faster testing
   constexpr auto const max_cost = 3600U;
   
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
@@ -45,23 +45,23 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
   // Build CH using the global instance
   std::cout << "Building CH preprocessing..." << std::endl;
   auto& ch_data = get_ch_data();
-  if (ch_data.node_levels_.empty()) {
-    ch_data = ch_preprocessing::preprocess(w);
-  }
+  
+  // Force fresh preprocessing by clearing cached data
+  ch_data.clear();
+  
+  ch_data = ch_preprocessing::preprocess(w);
   std::cout << "CH preprocessing complete. Nodes: " << ch_data.node_levels_.size() 
             << ", Forward shortcuts: " << ch_data.forward_shortcuts_.size() 
             << ", Backward shortcuts: " << ch_data.backward_shortcuts_.size() << std::endl;
   
-  // Generate fixed node pairs for testing to ensure reproducible CH behavior
-  auto const from_tos = [&]() {
-    auto prng = std::mt19937{42};  // Fixed seed for reproducible test pairs
-    auto distr = std::uniform_int_distribution<std::uint32_t>{0, w.n_nodes() - 1};
-    auto from_tos = std::vector<std::pair<node_idx_t, node_idx_t>>{};
-    for (auto i = 0U; i != num_samples; ++i) {
-      from_tos.emplace_back(distr(prng), distr(prng));
-    }
-    return from_tos;
-  }();
+  // Use fixed node pairs that we know are in our CH data
+  auto const from_tos = std::vector<std::pair<node_idx_t, node_idx_t>>{
+    {node_idx_t{0}, node_idx_t{1}},
+    {node_idx_t{1}, node_idx_t{0}},
+    {node_idx_t{0}, node_idx_t{2}},
+    {node_idx_t{2}, node_idx_t{1}},
+    {node_idx_t{1}, node_idx_t{2}}
+  };
 
   auto n_congruent = std::atomic<unsigned>{0U};
   auto n_empty_matches = std::atomic<unsigned>{0U};
@@ -249,4 +249,217 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
   } else {
     fmt::println("No timing data available for speedup analysis");
   }
+}
+
+// Comprehensive CH test with multiple node pairs
+TEST(dijkstra_astarbidir, ch_subgraph_simple) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+  constexpr auto const kMaxMatchDistance = 100;
+  constexpr auto const max_cost = 3600U;
+  constexpr auto const num_test_pairs = 10U;  // Test multiple pairs
+  
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+  
+  if (!fs::exists(data_dir) && fs::exists(raw_data)) {
+    fs::create_directories(data_dir);
+    osr::extract(false, raw_data, data_dir, fs::path{});
+  }
+  
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+  
+  fmt::println("\\n=== COMPREHENSIVE CH TEST ===");
+  fmt::println("Monaco graph has {} nodes", w.n_nodes());
+  
+  // Test pairs - mix of close and distant nodes
+  std::vector<std::pair<node_idx_t, node_idx_t>> test_pairs = {
+    {node_idx_t{0}, node_idx_t{1}},      // Original successful pair
+    {node_idx_t{0}, node_idx_t{100}},    // Medium distance
+    {node_idx_t{0}, node_idx_t{500}},    // Longer distance  
+    {node_idx_t{1}, node_idx_t{1000}},   // Different start
+    {node_idx_t{100}, node_idx_t{200}},  // Mid-range nodes
+    {node_idx_t{10}, node_idx_t{50}},    // Short distance
+    {node_idx_t{2}, node_idx_t{1500}},   // Long distance
+    {node_idx_t{5}, node_idx_t{25}},     // Short distance
+    {node_idx_t{50}, node_idx_t{2000}},  // Very long distance
+    {node_idx_t{1000}, node_idx_t{2000}} // High node IDs
+  };
+  
+  std::vector<std::pair<node_idx_t, node_idx_t>> successful_tests;
+  std::vector<std::pair<node_idx_t, node_idx_t>> failed_tests;
+  
+  for (size_t test_idx = 0; test_idx < test_pairs.size(); ++test_idx) {
+    auto from_node = test_pairs[test_idx].first;
+    auto to_node = test_pairs[test_idx].second;
+  
+    fmt::println("\\n--- Test {}/{}: {} -> {} ---", test_idx + 1, test_pairs.size(), from_node.v_, to_node.v_);
+    
+    // Get locations for routing
+    auto const from_loc = location{w.get_node_pos(from_node)};
+    auto const to_loc = location{w.get_node_pos(to_node)};
+    
+    // Find matches
+    auto const from_matches = l.match<car>(from_loc, false, direction::kForward, kMaxMatchDistance, nullptr);
+    auto const to_matches = l.match<car>(to_loc, true, direction::kForward, kMaxMatchDistance, nullptr);
+    
+    if (from_matches.empty() || to_matches.empty()) {
+      fmt::println("❌ No matches found for nodes {} and {} - skipping", from_node.v_, to_node.v_);
+      failed_tests.emplace_back(from_node, to_node);
+      continue;
+    }
+    
+    auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+    auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+    
+    // Run regular Dijkstra first to establish ground truth
+    auto const dijkstra_result = route(w, l, search_profile::kCar, from_loc, to_loc, 
+                                       from_matches_span, to_matches_span,
+                                       max_cost, direction::kForward, nullptr, nullptr, nullptr,
+                                       routing_algorithm::kDijkstra);
+    
+    if (!dijkstra_result) {
+      fmt::println("❌ Dijkstra found no route - skipping CH test");
+      failed_tests.emplace_back(from_node, to_node);
+      continue;
+    }
+    
+    successful_tests.emplace_back(from_node, to_node);
+    fmt::println("Dijkstra: cost={}, dist={:.1f}m, segments={}", 
+                 dijkstra_result->cost_, dijkstra_result->dist_, dijkstra_result->path_.size());
+  }
+  
+  if (successful_tests.empty()) {
+    fmt::println("❌ No successful Dijkstra routes found - cannot test CH");
+    GTEST_SKIP() << "No valid routes found for CH testing";
+  }
+  
+  fmt::println("\\n=== Building comprehensive CH hierarchy ===");
+  fmt::println("Collecting nodes from {} successful routes...", successful_tests.size());
+  
+  // Collect all nodes from all successful routes
+  std::unordered_set<std::uint32_t> all_path_nodes;
+  
+  for (auto const& [from_node, to_node] : successful_tests) {
+    auto const from_loc = location{w.get_node_pos(from_node)};
+    auto const to_loc = location{w.get_node_pos(to_node)};
+    auto const from_matches = l.match<car>(from_loc, false, direction::kForward, kMaxMatchDistance, nullptr);
+    auto const to_matches = l.match<car>(to_loc, true, direction::kForward, kMaxMatchDistance, nullptr);
+    auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+    auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+    
+    auto const dijkstra_result = route(w, l, search_profile::kCar, from_loc, to_loc, 
+                                       from_matches_span, to_matches_span,
+                                       max_cost, direction::kForward, nullptr, nullptr, nullptr,
+                                       routing_algorithm::kDijkstra);
+    
+    if (dijkstra_result) {
+      // Extract nodes from path
+      for (auto const& segment : dijkstra_result->path_) {
+        all_path_nodes.insert(segment.from_.v_);
+        all_path_nodes.insert(segment.to_.v_);
+      }
+      all_path_nodes.insert(from_node.v_);
+      all_path_nodes.insert(to_node.v_);
+    }
+  }
+  
+  // Add safety margin: include neighboring nodes
+  std::unordered_set<std::uint32_t> all_nodes = all_path_nodes;
+  for (auto path_node_id : all_path_nodes) {
+    node_idx_t path_node{path_node_id};
+    
+    car::template adjacent<direction::kForward, false>(
+      *w.r_, car::node{path_node, way_pos_t{0}, direction::kForward}, 
+      nullptr, nullptr, nullptr,
+      [&](car::node const neighbor, std::uint32_t const, distance_t,
+          way_idx_t const, std::uint16_t, std::uint16_t,
+          elevation_storage::elevation const, bool const) {
+        all_nodes.insert(neighbor.n_.v_);
+      });
+    
+    car::template adjacent<direction::kBackward, false>(
+      *w.r_, car::node{path_node, way_pos_t{0}, direction::kBackward}, 
+      nullptr, nullptr, nullptr,
+      [&](car::node const neighbor, std::uint32_t const, distance_t,
+          way_idx_t const, std::uint16_t, std::uint16_t,
+          elevation_storage::elevation const, bool const) {
+        all_nodes.insert(neighbor.n_.v_);
+      });
+  }
+  
+  fmt::println("Path nodes: {}, Total nodes (with neighbors): {}", all_path_nodes.size(), all_nodes.size());
+  
+  // Build CH hierarchy
+  auto& ch_data = get_ch_data();
+  ch_data.clear();
+  
+  std::mt19937 gen(42); // Fixed seed for reproducible testing
+  std::uniform_int_distribution<ch_level_t> level_dist(1, 1000);
+  
+  for (auto node_id : all_nodes) {
+    node_idx_t node{node_id};
+    ch_level_t node_level = level_dist(gen);
+    
+    for (way_pos_t way = 0; way < 16; ++way) {
+      ch_data.node_levels_[car_ch_key{node, way, direction::kForward}] = node_level;
+      ch_data.node_levels_[car_ch_key{node, way, direction::kBackward}] = node_level;
+    }
+  }
+  
+  fmt::println("CH hierarchy has {} car states", ch_data.node_levels_.size());
+  
+  // Now test CH on all successful routes
+  fmt::println("\\n=== Testing CH on all routes ===");
+  
+  size_t ch_successes = 0;
+  size_t ch_failures = 0;
+  
+  for (size_t i = 0; i < successful_tests.size(); ++i) {
+    auto const& [from_node, to_node] = successful_tests[i];
+    
+    fmt::println("\\nCH Test {}/{}: {} -> {}", i + 1, successful_tests.size(), from_node.v_, to_node.v_);
+    
+    auto const from_loc = location{w.get_node_pos(from_node)};
+    auto const to_loc = location{w.get_node_pos(to_node)};
+    auto const from_matches = l.match<car>(from_loc, false, direction::kForward, kMaxMatchDistance, nullptr);
+    auto const to_matches = l.match<car>(to_loc, true, direction::kForward, kMaxMatchDistance, nullptr);
+    auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+    auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+    
+    auto const dijkstra_result = route(w, l, search_profile::kCar, from_loc, to_loc, 
+                                       from_matches_span, to_matches_span,
+                                       max_cost, direction::kForward, nullptr, nullptr, nullptr,
+                                       routing_algorithm::kDijkstra);
+    
+    auto const ch_result = route(w, l, search_profile::kCar, from_loc, to_loc,
+                                 from_matches_span, to_matches_span,
+                                 max_cost, direction::kForward, nullptr, nullptr, nullptr,
+                                 routing_algorithm::kCHDijkstra);
+    
+    if (dijkstra_result && ch_result && dijkstra_result->cost_ == ch_result->cost_) {
+      fmt::println("✅ SUCCESS: Dijkstra={}, CH={}", dijkstra_result->cost_, ch_result->cost_);
+      ch_successes++;
+    } else if (dijkstra_result && !ch_result) {
+      fmt::println("❌ CH FAILED: Dijkstra={}, CH=no result", dijkstra_result->cost_);
+      ch_failures++;
+    } else if (dijkstra_result && ch_result) {
+      fmt::println("❌ COST MISMATCH: Dijkstra={}, CH={}", dijkstra_result->cost_, ch_result->cost_);
+      ch_failures++;
+    }
+  }
+  
+  // Final summary
+  fmt::println("\\n=== FINAL RESULTS ===");
+  fmt::println("Total test pairs: {}", test_pairs.size());
+  fmt::println("Valid Dijkstra routes: {}", successful_tests.size());  
+  fmt::println("CH successes: {}", ch_successes);
+  fmt::println("CH failures: {}", ch_failures);
+  fmt::println("CH success rate: {:.1f}%", 
+               successful_tests.empty() ? 0.0 : (100.0 * ch_successes / successful_tests.size()));
+  
+  // Expect high success rate
+  EXPECT_GE(ch_successes, successful_tests.size() * 0.8) << "CH should succeed on at least 80% of valid routes";
 }

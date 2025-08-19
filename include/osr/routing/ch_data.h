@@ -138,10 +138,44 @@ struct ch_data {
     add_shortcut(from_key, to_key, cost, contracted_key, middle_key, edge1, edge2);
   }
   
+  // Recursively unpack a shortcut into original edges
+  // Returns the path as a sequence of car_ch_keys representing the full route
+  std::vector<car_ch_key> unpack_shortcut(car_ch_key const& from, car_ch_key const& to) const {
+    std::vector<car_ch_key> path;
+    unpack_shortcut_recursive(from, to, path);
+    return path;
+  }
+  
   void clear() {
     node_levels_.clear();
     forward_shortcuts_.clear();
     backward_shortcuts_.clear();
+  }
+  
+private:
+  void unpack_shortcut_recursive(car_ch_key const& from, car_ch_key const& to, 
+                                 std::vector<car_ch_key>& path) const {
+    // Check if there's a shortcut from 'from' to 'to'
+    auto const* shortcuts = get_forward_shortcuts(from);
+    if (shortcuts) {
+      for (auto const& sc : *shortcuts) {
+        if (sc.to_ == to) {
+          // Found the shortcut, recursively unpack it
+          // The shortcut represents: from -> middle_node -> to
+          unpack_shortcut_recursive(from, sc.middle_node_, path);
+          // Add the middle node to the path
+          path.push_back(sc.middle_node_);
+          unpack_shortcut_recursive(sc.middle_node_, to, path);
+          return;
+        }
+      }
+    }
+    
+    // No shortcut found, this is a direct edge
+    // Add the destination to the path (source is handled by caller)
+    if (std::find(path.begin(), path.end(), to) == path.end()) {
+      path.push_back(to);
+    }
   }
 };
 

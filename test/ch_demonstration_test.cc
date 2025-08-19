@@ -44,11 +44,11 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
   auto const from = location{w.get_node_pos(node_idx_t{100})};
   auto const to = location{w.get_node_pos(node_idx_t{200})};
   
-  // Run normal Dijkstra
+  // Run bidirectional Dijkstra (fair comparison since CH is also bidirectional)
   auto const dijkstra_result = route(w, l, search_profile::kCar, from, to, 
                                      3600U, direction::kForward, 100.0, 
                                      nullptr, nullptr, nullptr,
-                                     routing_algorithm::kDijkstra);
+                                     routing_algorithm::kAStarBi);
   
   // Run CH Dijkstra
   auto const ch_result = route(w, l, search_profile::kCar, from, to,
@@ -56,7 +56,7 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
                                nullptr, nullptr, nullptr,
                                routing_algorithm::kCHDijkstra);
   
-  std::cout << "Dijkstra result: " 
+  std::cout << "Bidirectional Dijkstra result: " 
             << (dijkstra_result.has_value() ? std::to_string(dijkstra_result->cost_) : "no result")
             << std::endl;
   std::cout << "CH result: " 

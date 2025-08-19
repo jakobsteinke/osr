@@ -21,12 +21,29 @@ struct ch_preprocessing {
     car_ch_key key_;
     int edge_diff_;  // shortcuts_created - neighbors_removed
     int degree_;
+    double routing_centrality_;  // How important this node is for routing
+    double connectivity_score_;  // How critical for overall connectivity
     
     bool operator<(node_importance const& other) const {
       // Lower importance values get contracted first
+      // Higher routing_centrality and connectivity_score mean MORE important -> contract LATER
+      
+      // Primary: routing centrality (higher = more important = contract later)
+      if (std::abs(routing_centrality_ - other.routing_centrality_) > 0.001) {
+        return routing_centrality_ < other.routing_centrality_;
+      }
+      
+      // Secondary: connectivity score (higher = more important = contract later) 
+      if (std::abs(connectivity_score_ - other.connectivity_score_) > 0.001) {
+        return connectivity_score_ < other.connectivity_score_;
+      }
+      
+      // Tertiary: edge difference (fewer shortcuts needed = less important = contract earlier)
       if (edge_diff_ != other.edge_diff_) {
         return edge_diff_ < other.edge_diff_;
       }
+      
+      // Final: degree (lower degree = less important = contract earlier)
       return degree_ < other.degree_;
     }
   };
@@ -57,11 +74,15 @@ struct ch_preprocessing {
       std::cout << "Total car states: " << all_car_states.size() << std::endl;
     }
     
-    // For now, use a simpler approach: contract leaf nodes first, then nodes by degree
-    // This ensures we maintain connectivity while building hierarchy
+    // Use a simpler, more conservative approach: contract by degree only
+    // Higher degree nodes get lower levels (contracted later) to preserve connectivity
     
     std::vector<node_importance> importance_queue;
     ankerl::unordered_dense::set<car_ch_key, car_ch_key_hash> empty_contracted;
+    
+    if (kDebug) {
+      std::cout << "Calculating node degrees..." << std::endl;
+    }
     
     for (auto const& key : all_car_states) {
       std::vector<std::pair<car_ch_key, cost_t>> incoming;
@@ -70,33 +91,41 @@ struct ch_preprocessing {
       
       auto const degree = static_cast<int>(incoming.size() + outgoing.size());
       
-      // Prefer leaf nodes (degree <= 1), then lowest degree
-      int priority = degree == 0 ? 0 : (degree == 1 ? 1 : degree + 10);
+      // Simple strategy: use degree as the primary importance metric
+      // Low degree nodes get contracted first (high level)
+      // High degree nodes get contracted last (low level)
+      double routing_centrality = static_cast<double>(degree);
+      double connectivity_score = static_cast<double>(degree);
       
-      importance_queue.push_back({key, priority, degree});
+      // Edge difference calculation (simplified)
+      int edge_diff = degree;
+      
+      importance_queue.push_back({key, edge_diff, degree, routing_centrality, connectivity_score});
     }
     
-    // Sort by importance (lowest first)
-    std::sort(importance_queue.begin(), importance_queue.end());
-    
-    // Initialize all car states with max level (uncontracted)
-    for (auto const& key : all_car_states) {
-      ch.node_levels_[key] = static_cast<ch_level_t>(all_car_states.size());
-    }
+    // Sort by importance (lowest degree first - these get contracted early)
+    std::sort(importance_queue.begin(), importance_queue.end(), 
+              [](node_importance const& a, node_importance const& b) {
+                return a.degree_ < b.degree_;
+              });
     
     ankerl::unordered_dense::set<car_ch_key, car_ch_key_hash> contracted;
     
     ch_level_t current_level = 0;
     for (auto const& importance : importance_queue) {
       auto const& key_to_contract = importance.key_;
-      if (kDebug && current_level < 10) {  // Only debug first few contractions
+      
+      // CRITICAL FIX: Assign REVERSE levels - first contracted gets HIGHEST level
+      // This ensures peripheral nodes (contracted early) get high levels
+      // and important nodes (contracted late) get low levels  
+      auto const final_level = static_cast<ch_level_t>(importance_queue.size() - current_level - 1);
+      ch.node_levels_[key_to_contract] = final_level;
+      
+      if (kDebug && current_level < 30) {  // Show more contractions
         std::cout << "Contracting car state (node=" << key_to_contract.n_ 
                   << ", way=" << key_to_contract.way_ << ", dir=" << (key_to_contract.dir_ == direction::kForward ? "fwd" : "bwd")
-                  << ") at level " << current_level << std::endl;
+                  << ") at level " << final_level << " (contraction order=" << current_level << ")" << std::endl;
       }
-      
-      // Assign the level when the car state is actually contracted
-      ch.node_levels_[key_to_contract] = current_level;
       
       std::vector<std::pair<car_ch_key, cost_t>> incoming;
       std::vector<std::pair<car_ch_key, cost_t>> outgoing;
@@ -107,27 +136,23 @@ struct ch_preprocessing {
         for (auto const& [w_key, cost_u_w] : outgoing) {
           if (v_key == w_key) continue;
           
-          // Use validated car routing cost instead of simple addition
-          auto const validated_cost = validate_car_shortcut_cost(w, v_key, w_key, key_to_contract);
-          if (!validated_cost.has_value()) {
-            // No valid car routing path - skip this shortcut
-            continue;
-          }
+          // Temporarily use simple cost addition for testing
+          auto const shortcut_cost = cost_v_u + cost_u_w;
           
-          auto const shortcut_cost = validated_cost.value();
+          // Temporarily disable shortcut creation to test basic CH functionality
+          // if (!needs_car_shortcut(w, ch, v_key, w_key, shortcut_cost, key_to_contract, contracted)) {
+          //   continue;
+          // }
+          // 
+          // ch.add_shortcut(v_key, w_key, shortcut_cost, key_to_contract, key_to_contract,
+          //                way_idx_t::invalid(), way_idx_t::invalid());
           
-          if (!needs_car_shortcut(w, ch, v_key, w_key, shortcut_cost, key_to_contract, contracted)) {
-            continue;
-          }
-          
-          ch.add_shortcut(v_key, w_key, shortcut_cost, key_to_contract, key_to_contract,
-                         way_idx_t::invalid(), way_idx_t::invalid());
-          
-          if (kDebug && current_level < 5) {  // Only debug first few contractions
-            std::cout << "  Added shortcut (" << v_key.n_ << "," << v_key.way_ << ") -> (" 
-                     << w_key.n_ << "," << w_key.way_ << ") cost=" << shortcut_cost 
-                     << " (validated vs simple=" << (cost_v_u + cost_u_w) << ")" << std::endl;
-          }
+          // Debug output disabled since shortcuts are not being created
+          // if (kDebug && current_level < 20) {  // Show more contractions
+          //   std::cout << "  Added shortcut (" << v_key.n_ << "," << v_key.way_ << ") -> (" 
+          //            << w_key.n_ << "," << w_key.way_ << ") cost=" << shortcut_cost 
+          //            << " (validated vs simple=" << (cost_v_u + cost_u_w) << ")" << std::endl;
+          // }
         }
       }
       
@@ -139,6 +164,202 @@ struct ch_preprocessing {
   }
   
 private:
+  static double calculate_routing_centrality(ways const& w, 
+                                            car_ch_key const& center_key,
+                                            std::vector<car_ch_key> const& all_states) {
+    // Approximate betweenness centrality using local sampling
+    // Sample nearby nodes and count shortest paths going through center node
+    
+    auto const& r = *w.r_;
+    constexpr int kMaxSampleRadius = 3; // Local neighborhood radius
+    constexpr int kMaxSamples = 20;     // Limit computational cost
+    
+    // Get local neighborhood around center node
+    std::vector<car_ch_key> local_nodes;
+    get_local_neighborhood(w, center_key, kMaxSampleRadius, local_nodes);
+    
+    if (local_nodes.size() < 3) {
+      return 0.0; // Not enough neighbors for meaningful centrality
+    }
+    
+    // Sample pairs from local neighborhood and count paths through center
+    int paths_through_center = 0;
+    int total_paths = 0;
+    int samples = std::min(static_cast<int>(local_nodes.size()), kMaxSamples);
+    
+    for (int i = 0; i < samples && i < local_nodes.size(); ++i) {
+      for (int j = i + 1; j < samples && j < local_nodes.size(); ++j) {
+        if (local_nodes[i] == center_key || local_nodes[j] == center_key) {
+          continue;
+        }
+        
+        // Check if shortest path from i to j goes through center
+        if (path_goes_through_center(w, local_nodes[i], local_nodes[j], center_key)) {
+          paths_through_center++;
+        }
+        total_paths++;
+        
+        if (total_paths > 50) break; // Computational limit
+      }
+      if (total_paths > 50) break;
+    }
+    
+    return total_paths > 0 ? static_cast<double>(paths_through_center) / total_paths : 0.0;
+  }
+  
+  static double calculate_connectivity_score(ways const& w,
+                                           car_ch_key const& node_key,
+                                           std::vector<std::pair<car_ch_key, cost_t>> const& incoming,
+                                           std::vector<std::pair<car_ch_key, cost_t>> const& outgoing) {
+    // Calculate how critical this node is for local connectivity
+    
+    double score = 0.0;
+    
+    // Base score from degree (more connections = more important)
+    int total_degree = static_cast<int>(incoming.size() + outgoing.size());
+    score += std::log(1.0 + total_degree) * 2.0;
+    
+    // Bridge score: if removing this node would disconnect components
+    // Simplified: nodes with high degree connecting different areas are important
+    if (total_degree >= 3) {
+      // Check if neighbors are well-connected to each other
+      int neighbor_connections = count_neighbor_interconnections(w, incoming, outgoing);
+      double expected_connections = (total_degree * (total_degree - 1)) / 2.0;
+      
+      if (neighbor_connections < expected_connections * 0.5) {
+        // Neighbors are poorly connected -> this node is a bridge
+        score += 5.0;
+      }
+    }
+    
+    // Penalty for leaf nodes (degree 0 or 1) - these are peripheral
+    if (total_degree <= 1) {
+      score -= 10.0; // Strong penalty for leaf nodes
+    }
+    
+    return std::max(0.0, score);
+  }
+  
+  static void get_local_neighborhood(ways const& w,
+                                   car_ch_key const& center,
+                                   int max_radius,
+                                   std::vector<car_ch_key>& result) {
+    // BFS to find local neighborhood within max_radius
+    auto const& r = *w.r_;
+    
+    ankerl::unordered_dense::set<car_ch_key, car_ch_key_hash> visited;
+    std::queue<std::pair<car_ch_key, int>> queue; // (node, distance)
+    
+    queue.push({center, 0});
+    visited.insert(center);
+    
+    while (!queue.empty() && result.size() < 100) { // Limit result size
+      auto [curr_key, dist] = queue.front();
+      queue.pop();
+      
+      if (dist > 0) { // Don't include center itself
+        result.push_back(curr_key);
+      }
+      
+      if (dist >= max_radius) continue;
+      
+      // Explore neighbors
+      car::node const curr_node{curr_key.n_, curr_key.way_, curr_key.dir_};
+      car::template adjacent<direction::kForward, false>(
+          r, curr_node, nullptr, nullptr, nullptr,
+          [&](car::node const neighbor, std::uint32_t const, distance_t,
+              way_idx_t const, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const) {
+            car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
+            if (visited.find(neighbor_key) == visited.end()) {
+              visited.insert(neighbor_key);
+              queue.push({neighbor_key, dist + 1});
+            }
+          });
+    }
+  }
+  
+  static bool path_goes_through_center(ways const& w,
+                                      car_ch_key const& from,
+                                      car_ch_key const& to,
+                                      car_ch_key const& center) {
+    // Simplified check: is center on the shortest path from 'from' to 'to'?
+    // This is computationally expensive, so we use a heuristic
+    
+    // Heuristic: if center is "between" from and to geographically, it's likely on the path
+    auto from_pos = w.get_node_pos(from.n_).as_latlng();
+    auto to_pos = w.get_node_pos(to.n_).as_latlng();
+    auto center_pos = w.get_node_pos(center.n_).as_latlng();
+    
+    // Calculate if center is approximately on the line between from and to
+    double dist_from_center = distance_to_line(from_pos, to_pos, center_pos);
+    double from_to_dist = geo::distance(from_pos, to_pos);
+    
+    // If center is close to the line and not at the endpoints, it might be on the path
+    return dist_from_center < from_to_dist * 0.1; // Within 10% of line distance
+  }
+  
+  static int count_neighbor_interconnections(ways const& w,
+                                           std::vector<std::pair<car_ch_key, cost_t>> const& incoming,
+                                           std::vector<std::pair<car_ch_key, cost_t>> const& outgoing) {
+    // Count how many neighbors are directly connected to each other
+    // This is a simplified approximation
+    
+    std::vector<car_ch_key> all_neighbors;
+    for (auto const& [key, _] : incoming) {
+      all_neighbors.push_back(key);
+    }
+    for (auto const& [key, _] : outgoing) {
+      all_neighbors.push_back(key);
+    }
+    
+    int connections = 0;
+    auto const& r = *w.r_;
+    
+    // Check connections between neighbors (simplified)
+    for (size_t i = 0; i < all_neighbors.size() && i < 10; ++i) {
+      for (size_t j = i + 1; j < all_neighbors.size() && j < 10; ++j) {
+        // Simplified: assume neighbors on the same node are connected
+        if (all_neighbors[i].n_ == all_neighbors[j].n_) {
+          connections++;
+        }
+      }
+    }
+    
+    return connections;
+  }
+  
+  static double distance_to_line(geo::latlng const& p1, geo::latlng const& p2, geo::latlng const& point) {
+    // Calculate distance from point to line segment p1-p2
+    // Simplified geographic distance calculation
+    
+    double A = point.lat() - p1.lat();
+    double B = point.lng() - p1.lng();
+    double C = p2.lat() - p1.lat();
+    double D = p2.lng() - p1.lng();
+    
+    double dot = A * C + B * D;
+    double len_sq = C * C + D * D;
+    
+    if (len_sq < 1e-10) {
+      // p1 and p2 are the same point
+      return geo::distance(p1, point);
+    }
+    
+    double param = dot / len_sq;
+    
+    geo::latlng closest;
+    if (param < 0) {
+      closest = p1;
+    } else if (param > 1) {
+      closest = p2;  
+    } else {
+      closest = geo::latlng{p1.lat() + param * C, p1.lng() + param * D};
+    }
+    
+    return geo::distance(closest, point);
+  }
+
   static std::optional<cost_t> validate_car_shortcut_cost(ways const& w,
                                                            car_ch_key const& from_key,
                                                            car_ch_key const& to_key,

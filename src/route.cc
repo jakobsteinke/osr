@@ -1073,7 +1073,7 @@ std::optional<path> route_ch_with_matches(ways const& w,
         continue;
       }
       std::cout << "CH: Adding start node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-      car::resolve_all(r, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, 
+      car::resolve_start_node(r, start_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, dir,
                        [&](car::node const start_node) {
         dijkstra.add_start(w, car::label{start_node, nc->cost_}, &ch_data);
         has_start_nodes = true;
@@ -1104,7 +1104,7 @@ std::optional<path> route_ch_with_matches(ways const& w,
           continue;
         }
         std::cout << "CH: Adding end node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-        car::resolve_all(r, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, 
+        car::resolve_start_node(r, end_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, opposite(dir),
                          [&](car::node const end_node) {
           dijkstra.add_end(w, car::label{end_node, nc->cost_}, &ch_data);
           has_end_nodes = true;

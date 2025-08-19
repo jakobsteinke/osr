@@ -15,7 +15,7 @@
 namespace osr {
 
 struct ch_preprocessing {
-  static constexpr bool kDebug = false;
+  static constexpr bool kDebug = false;  // Disable for cleaner speedup analysis
   
   struct node_importance {
     car_ch_key key_;
@@ -74,90 +74,69 @@ struct ch_preprocessing {
       std::cout << "Total car states: " << all_car_states.size() << std::endl;
     }
     
-    // Use a simpler, more conservative approach: contract by degree only
-    // Higher degree nodes get lower levels (contracted later) to preserve connectivity
-    
-    std::vector<node_importance> importance_queue;
-    ankerl::unordered_dense::set<car_ch_key, car_ch_key_hash> empty_contracted;
-    
-    if (kDebug) {
-      std::cout << "Calculating node degrees..." << std::endl;
-    }
-    
-    for (auto const& key : all_car_states) {
-      std::vector<std::pair<car_ch_key, cost_t>> incoming;
-      std::vector<std::pair<car_ch_key, cost_t>> outgoing;
-      collect_car_neighbors(w, ch, key, empty_contracted, incoming, outgoing);
-      
-      auto const degree = static_cast<int>(incoming.size() + outgoing.size());
-      
-      // Simple strategy: use degree as the primary importance metric
-      // Low degree nodes get contracted first (high level)
-      // High degree nodes get contracted last (low level)
-      double routing_centrality = static_cast<double>(degree);
-      double connectivity_score = static_cast<double>(degree);
-      
-      // Edge difference calculation (simplified)
-      int edge_diff = degree;
-      
-      importance_queue.push_back({key, edge_diff, degree, routing_centrality, connectivity_score});
-    }
-    
-    // Sort by importance (lowest degree first - these get contracted early)
-    std::sort(importance_queue.begin(), importance_queue.end(), 
-              [](node_importance const& a, node_importance const& b) {
-                return a.degree_ < b.degree_;
-              });
+    // Use fixed seed random ordering for reproducible results during testing
+    // This ensures all nodes have a chance to get shortcuts regardless of degree
+    std::mt19937 gen(12345);  // Fixed seed for reproducible CH hierarchy
+    std::shuffle(all_car_states.begin(), all_car_states.end(), gen);
     
     ankerl::unordered_dense::set<car_ch_key, car_ch_key_hash> contracted;
     
-    ch_level_t current_level = 0;
-    for (auto const& importance : importance_queue) {
-      auto const& key_to_contract = importance.key_;
+    //ch_level_t current_level = 0;
+    //ch_level_t total_nodes = all_car_states.size();
+
+    size_t current_level = 0;
+    const size_t total_nodes = all_car_states.size();
+    for (auto const& key_to_contract : all_car_states) {
       
-      // CRITICAL FIX: Assign REVERSE levels - first contracted gets HIGHEST level
-      // This ensures peripheral nodes (contracted early) get high levels
-      // and important nodes (contracted late) get low levels  
-      auto const final_level = static_cast<ch_level_t>(importance_queue.size() - current_level - 1);
-      ch.node_levels_[key_to_contract] = final_level;
+      // FIXED: Assign levels in reverse order - last contracted (most important) gets level 0
+      // ch.node_levels_[key_to_contract] = total_nodes - current_level - 1;
+
+       const size_t level_val = total_nodes - current_level - 1;
+        ch.node_levels_[key_to_contract] =
+            static_cast<ch_level_t>(std::min(
+                level_val,
+                static_cast<size_t>(std::numeric_limits<ch_level_t>::max())));
       
-      if (kDebug && current_level < 30) {  // Show more contractions
+      if (kDebug && current_level < 50) {
         std::cout << "Contracting car state (node=" << key_to_contract.n_ 
                   << ", way=" << key_to_contract.way_ << ", dir=" << (key_to_contract.dir_ == direction::kForward ? "fwd" : "bwd")
-                  << ") at level " << final_level << " (contraction order=" << current_level << ")" << std::endl;
+                  << ") at level " << ch.node_levels_[key_to_contract];
+        std::cout << " [STORED KEY: n=" << key_to_contract.n_.v_ << " way=" << key_to_contract.way_ << " dir=" << (key_to_contract.dir_ == direction::kForward ? "fwd" : "bwd") << "]";
+        std::cout << std::endl;
       }
       
+      // Per detailed-project-description.md section 1.2: "Contract nodes and insert shortcuts"
       std::vector<std::pair<car_ch_key, cost_t>> incoming;
       std::vector<std::pair<car_ch_key, cost_t>> outgoing;
       
       collect_car_neighbors(w, ch, key_to_contract, contracted, incoming, outgoing);
       
+      // For every pair (v,w) with edges v→u and u→w, check if shortcut needed
       for (auto const& [v_key, cost_v_u] : incoming) {
         for (auto const& [w_key, cost_u_w] : outgoing) {
           if (v_key == w_key) continue;
           
-          // Temporarily use simple cost addition for testing
           auto const shortcut_cost = cost_v_u + cost_u_w;
           
-          // Temporarily disable shortcut creation to test basic CH functionality
-          // if (!needs_car_shortcut(w, ch, v_key, w_key, shortcut_cost, key_to_contract, contracted)) {
-          //   continue;
-          // }
-          // 
-          // ch.add_shortcut(v_key, w_key, shortcut_cost, key_to_contract, key_to_contract,
-          //                way_idx_t::invalid(), way_idx_t::invalid());
-          
-          // Debug output disabled since shortcuts are not being created
-          // if (kDebug && current_level < 20) {  // Show more contractions
-          //   std::cout << "  Added shortcut (" << v_key.n_ << "," << v_key.way_ << ") -> (" 
-          //            << w_key.n_ << "," << w_key.way_ << ") cost=" << shortcut_cost 
-          //            << " (validated vs simple=" << (cost_v_u + cost_u_w) << ")" << std::endl;
-          // }
+          // Per section 1.2: check if witness path exists that's equal or shorter
+          if (needs_car_shortcut(w, ch, v_key, w_key, shortcut_cost, key_to_contract, contracted)) {
+            ch.add_shortcut(v_key, w_key, shortcut_cost, key_to_contract, key_to_contract,
+                           way_idx_t::invalid(), way_idx_t::invalid());
+            
+            if (kDebug && current_level < 20) {
+              std::cout << "  Added shortcut (" << v_key.n_ << "," << v_key.way_ << ") -> (" 
+                       << w_key.n_ << "," << w_key.way_ << ") cost=" << shortcut_cost << std::endl;
+            }
+          }
         }
       }
       
       contracted.insert(key_to_contract);
       ++current_level;
+    }
+    
+    if (kDebug) {
+      std::cout << "CH preprocessing complete. Total levels assigned: " << current_level << std::endl;
     }
     
     return ch;

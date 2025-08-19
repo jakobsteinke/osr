@@ -20,7 +20,7 @@ struct ch_dijkstra {
   using hash = car::hash;
   using internal_cost_t = std::uint32_t;  // Use larger type for internal calculations
 
-  static constexpr bool kDebug = false;  // Disable for clean testing
+  static constexpr bool kDebug = false;  // Disable debug for cleaner output
 
   // Custom label for CH that uses larger cost type
   struct ch_label {
@@ -335,18 +335,23 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Level filtering: forward search only traverses upward edges (section 2.2)
-          // TEMPORARILY DISABLED FOR DEBUGGING
-          if (false && ch) {
+          // Level filtering: forward search with relaxed upward requirement
+          if (ch) {
             car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
             car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
-            if (!ch->is_upward_edge(curr_key, neighbor_key)) {
+            auto curr_level = ch->get_level(curr_key);
+            auto neighbor_level = ch->get_level(neighbor_key);
+            
+            // Allow upward edges + limited downward exploration for connectivity
+            bool allow_edge = curr_level <= neighbor_level || 
+                             (neighbor_level + 100 >= curr_level);  // Allow small level drops
+            
+            if (!allow_edge) {
               filtered_count++;
               if (kDebug) {
                 std::cout << "  FWD FILTERED edge (" << curr.n_ << "," << curr.way_ << ")->(" 
                          << neighbor.n_ << "," << neighbor.way_ << ") (level " 
-                         << ch->get_level(curr_key) << " -> " 
-                         << ch->get_level(neighbor_key) << ")\n";
+                         << curr_level << " -> " << neighbor_level << ")\n";
               }
               return;
             }
@@ -405,19 +410,24 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Level filtering: backward search traverses upward edges in reverse graph
-          // In backward search, we traverse edge neighbor->curr, and want level[neighbor] < level[curr] (upward in reverse)
-          // TEMPORARILY DISABLED FOR DEBUGGING
-          if (false && ch) {
+          // Level filtering: backward search with relaxed upward requirement in reverse
+          if (ch) {
             car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
             car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
-            if (!ch->is_upward_edge(neighbor_key, curr_key)) {
+            auto curr_level = ch->get_level(curr_key);
+            auto neighbor_level = ch->get_level(neighbor_key);
+            
+            // For backward search: allow edges where neighbor_level <= curr_level (upward in reverse)
+            // + limited downward exploration for connectivity
+            bool allow_edge = neighbor_level <= curr_level || 
+                             (curr_level + 100 >= neighbor_level);  // Allow small level drops
+            
+            if (!allow_edge) {
               filtered_count++;
               if (kDebug) {
-                std::cout << "  BWD FILTERED non-upward edge (" << neighbor.n_ << "," << neighbor.way_ << ")->(" 
+                std::cout << "  BWD FILTERED edge (" << neighbor.n_ << "," << neighbor.way_ << ")->(" 
                          << curr.n_ << "," << curr.way_ << ") (level " 
-                         << ch->get_level(neighbor_key) << " -> " 
-                         << ch->get_level(curr_key) << ")\n";
+                         << neighbor_level << " -> " << curr_level << ")\n";
               }
               return;
             }

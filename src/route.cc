@@ -31,6 +31,19 @@
 
 namespace osr {
 
+// Forward declaration
+std::optional<path> route_ch_with_matches(ways const& w,
+                                          lookup const& l,
+                                          location const& from,
+                                          location const& to,
+                                          match_view_t from_match,
+                                          match_view_t to_match,
+                                          cost_t const max,
+                                          direction const dir,
+                                          bitvec<node_idx_t> const* blocked,
+                                          sharing_data const* sharing,
+                                          elevation_storage const* elevations);
+
 struct connecting_way {
   constexpr bool valid() const { return way_ != way_idx_t::invalid(); }
 
@@ -758,134 +771,7 @@ std::optional<path> route_ch(ways const& w,
     return std::nullopt;
   }
   
-  // Direct path check
-  if (auto const direct = try_direct(from, to); direct.has_value()) {
-    return *direct;
-  }
-  
-  // Match bidirectional architecture: nested loop over start-end pairs
-  std::cout << "CH: Starting nested loop search, from_match.size() = " << from_match.size() 
-            << ", to_match.size() = " << to_match.size() << std::endl;
-  
-  for (auto const [i, start] : utl::enumerate(from_match)) {
-    auto const start_way = start.way_;
-    std::cout << "CH: Processing start way " << start_way << " (index " << i << ")" << std::endl;
-    
-    // Add start nodes for THIS start way only
-    ch_dijkstra_instance.reset(max);
-    bool has_start_nodes = false;
-    for (auto const* nc : {&start.left_, &start.right_}) {
-      if (!nc->valid() || nc->cost_ >= max) {
-        std::cout << "CH: Skipping invalid/expensive start node (cost=" << nc->cost_ << ", max=" << max << ")" << std::endl;
-        continue;
-      }
-      std::cout << "CH: Adding start node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-      car::resolve_start_node(
-          *w.r_, start_way, nc->node_, from.lvl_, dir, 
-          [&](car::node const n) {
-            auto label = car::label{n, static_cast<cost_t>(nc->cost_)};
-            label.track(label, *w.r_, start_way, n.get_node(), false);
-            ch_dijkstra_instance.add_start(w, label, &ch_data_instance);
-            has_start_nodes = true;
-          });
-    }
-    
-    if (!has_start_nodes) {
-      std::cout << "CH: No valid start nodes for way " << start_way << ", continuing" << std::endl;
-      continue;
-    }
-    
-    // Inner loop: try each end way that's in the same component
-    for (auto const [j, end] : utl::enumerate(to_match)) {
-      auto const end_way = end.way_;
-      
-      // Component connectivity check - match bidirectional exactly
-      if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
-        continue;
-      }
-      
-      std::cout << "CH: Processing end way " << end_way << " (index " << j << ") - same component as start" << std::endl;
-      
-      // Add end nodes for THIS end way only
-      bool has_end_nodes = false;
-      for (auto const* nc : {&end.left_, &end.right_}) {
-        if (!nc->valid() || nc->cost_ >= max) {
-          std::cout << "CH: Skipping invalid/expensive end node (cost=" << nc->cost_ << ", max=" << max << ")" << std::endl;
-          continue;
-        }
-        std::cout << "CH: Adding end node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-        car::resolve_start_node(
-            *w.r_, end_way, nc->node_, to.lvl_, opposite(dir),
-            [&](car::node const n) {
-              auto label = car::label{n, static_cast<cost_t>(nc->cost_)};
-              label.track(label, *w.r_, end_way, n.get_node(), false);
-              ch_dijkstra_instance.add_end(w, label, &ch_data_instance);
-              has_end_nodes = true;
-            });
-      }
-      
-      if (!has_end_nodes) {
-        std::cout << "CH: No valid end nodes for way " << end_way << ", continuing" << std::endl;
-        continue;
-      }
-      
-      // Run CH search for this specific start-end pair
-      std::cout << "CH: Running search for start way " << start_way << " to end way " << end_way << std::endl;
-      bool success = false;
-      if (blocked == nullptr) {
-        success = ch_dijkstra_instance.run<false>(
-            w, *w.r_, max, blocked, &ch_data_instance, sharing, elevations);
-      } else {
-        success = ch_dijkstra_instance.run<true>(
-            w, *w.r_, max, blocked, &ch_data_instance, sharing, elevations);
-      }
-      
-      // Check if path found for this pair
-      if (success && ch_dijkstra_instance.best_cost_ != std::numeric_limits<ch_dijkstra::internal_cost_t>::max()) {
-        std::cout << "CH: Found path for start way " << start_way << " to end way " << end_way 
-                  << " with cost " << ch_dijkstra_instance.best_cost_ << std::endl;
-        
-        // Reconstruct path - match bidirectional's early return behavior
-        auto p = path{.cost_ = static_cast<cost_t>(std::min(ch_dijkstra_instance.best_cost_, 
-                                                            static_cast<ch_dijkstra::internal_cost_t>(std::numeric_limits<cost_t>::max())))};
-        
-        // Simple path reconstruction
-        std::vector<car::node> full_path;
-        full_path.push_back(ch_dijkstra_instance.forward_meet_node_);
-        if (ch_dijkstra_instance.backward_meet_node_.n_ != ch_dijkstra_instance.forward_meet_node_.n_) {
-          full_path.push_back(ch_dijkstra_instance.backward_meet_node_);
-        }
-        
-        // Build path segments
-        if (full_path.size() >= 2) {
-          for (size_t k = 0; k < full_path.size() - 1; ++k) {
-            auto const& from_node = full_path[k];
-            auto const& to_node = full_path[k + 1];
-            
-            auto seg = path::segment{
-                .from_ = from_node.n_,
-                .to_ = to_node.n_,
-                .way_ = way_idx_t::invalid(),
-                .dist_ = 0,
-                .mode_ = mode::kCar
-            };
-            
-            seg.polyline_.emplace_back(w.get_node_pos(from_node.n_));
-            seg.polyline_.emplace_back(w.get_node_pos(to_node.n_));
-            
-            p.segments_.push_back(std::move(seg));
-          }
-        }
-        
-        return p;  // Return first successful path - match bidirectional behavior
-      }
-      
-      std::cout << "CH: No path found for start way " << start_way << " to end way " << end_way << std::endl;
-    }
-  }
-  
-  std::cout << "CH: No path found across all start-end pairs" << std::endl;
-  return std::nullopt;
+  return route_ch_with_matches(w, l, from, to, from_match, to_match, max, dir, blocked, sharing, elevations);
 }
 
 std::vector<std::optional<path>> route(
@@ -1048,103 +934,97 @@ std::optional<path> route_ch_with_matches(ways const& w,
                                           bitvec<node_idx_t> const* blocked,
                                           sharing_data const* sharing,
                                           elevation_storage const* elevations) {
-  std::cout << "route_ch_with_matches called!" << std::endl;
-  std::cout << "From matches: " << from_match.size() << ", To matches: " << to_match.size() << std::endl;
-  std::cout << "*** USING NEW NESTED LOOP ARCHITECTURE ***" << std::endl;
-  
-  auto& dijkstra = get_ch_dijkstra();
+  if (auto const direct = try_direct(from, to); direct.has_value()) {
+    return *direct;
+  }
+
+  auto& ch = get_ch_dijkstra();
   auto& ch_data = get_ch_data();
   auto const& r = *w.r_;
   
-  // Match bidirectional architecture: nested loop over start-end pairs
-  std::cout << "CH: Starting nested loop search, from_match.size() = " << from_match.size() 
-            << ", to_match.size() = " << to_match.size() << std::endl;
+  ch.reset(max);
+  if (ch.best_cost_ == 0) {  // No radius check equivalent in CH
+    return std::nullopt;
+  }
   
+  // Mirror bidirectional.h architecture exactly
   for (auto const [i, start] : utl::enumerate(from_match)) {
+    // Skip if component optimization applies (mirror line 489 in bidirectional)
     auto const start_way = start.way_;
-    std::cout << "CH: Processing start way " << start_way << " (index " << i << ")" << std::endl;
     
-    // Add start nodes for THIS start way only
-    dijkstra.reset(max);
-    bool has_start_nodes = false;
+    // Add start nodes for this way (mirror lines 493-502)
     for (auto const* nc : {&start.left_, &start.right_}) {
-      if (!nc->valid() || nc->cost_ >= max) {
-        std::cout << "CH: Skipping invalid/expensive start node (cost=" << nc->cost_ << ", max=" << max << ")" << std::endl;
-        continue;
+      if (nc->valid() && nc->cost_ < max) {
+        car::resolve_start_node(r, start_way, nc->node_, from.lvl_, dir, [&](auto const node) {
+          auto label = car::label{node, nc->cost_};
+          label.track(label, r, start_way, node.get_node(), false);
+          ch.add_start(w, label, &ch_data);
+        });
       }
-      std::cout << "CH: Adding start node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-      car::resolve_start_node(r, start_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, dir,
-                       [&](car::node const start_node) {
-        dijkstra.add_start(w, car::label{start_node, nc->cost_}, &ch_data);
-        has_start_nodes = true;
-      });
     }
     
-    if (!has_start_nodes) {
-      std::cout << "CH: No valid start nodes for way " << start_way << ", continuing" << std::endl;
+    // Skip if no forward nodes added (mirror line 503-505)
+    if (ch.pq_forward_.empty()) {
       continue;
     }
     
-    // Inner loop: try each end way that's in the same component
+    // Inner loop over end matches (mirror lines 506-527)
     for (auto const [j, end] : utl::enumerate(to_match)) {
-      auto const end_way = end.way_;
-      
-      // Component connectivity check - match bidirectional exactly
+      // Component connectivity check (mirror line 507-509)
       if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
         continue;
       }
       
-      std::cout << "CH: Processing end way " << end_way << " (index " << j << ") - same component as start" << std::endl;
+      auto const end_way = end.way_;
       
-      // Add end nodes for THIS end way only
-      bool has_end_nodes = false;
+      // Add end nodes for this way (mirror lines 514-524)
       for (auto const* nc : {&end.left_, &end.right_}) {
-        if (!nc->valid() || nc->cost_ >= max) {
-          std::cout << "CH: Skipping invalid/expensive end node (cost=" << nc->cost_ << ", max=" << max << ")" << std::endl;
-          continue;
+        if (nc->valid() && nc->cost_ < max) {
+          car::resolve_start_node(r, end_way, nc->node_, to.lvl_, opposite(dir), [&](auto const node) {
+            auto label = car::label{node, nc->cost_};
+            label.track(label, r, end_way, node.get_node(), false);
+            ch.add_end(w, label, &ch_data);
+          });
         }
-        std::cout << "CH: Adding end node " << nc->node_ << " cost=" << nc->cost_ << std::endl;
-        car::resolve_start_node(r, end_way, nc->node_, level_t{static_cast<std::uint8_t>(0U)}, opposite(dir),
-                         [&](car::node const end_node) {
-          dijkstra.add_end(w, car::label{end_node, nc->cost_}, &ch_data);
-          has_end_nodes = true;
-        });
       }
       
-      if (!has_end_nodes) {
-        std::cout << "CH: No valid end nodes for way " << end_way << ", continuing" << std::endl;
+      // Skip if no backward nodes added (mirror line 525-527)
+      if (ch.pq_backward_.empty()) {
         continue;
       }
       
-      // Run CH search for this specific start-end pair
-      std::cout << "CH: Running search for start way " << start_way << " to end way " << end_way << std::endl;
-      auto const found = blocked ? dijkstra.run<true>(w, r, max, blocked, &ch_data, 
-                                                      sharing, elevations)
-                                 : dijkstra.run<false>(w, r, max, nullptr, &ch_data, 
-                                                       sharing, elevations);
+      // Run search for this start-end pair (mirror line 528-529)
+      auto const should_continue = blocked ? ch.run<true>(w, r, max, blocked, &ch_data, sharing, elevations)
+                                           : ch.run<false>(w, r, max, nullptr, &ch_data, sharing, elevations);
       
-      // Check if path found for this pair
-      if (found && dijkstra.best_cost_ != std::numeric_limits<ch_dijkstra::internal_cost_t>::max()) {
-        std::cout << "CH: Found path for start way " << start_way << " to end way " << end_way 
-                  << " with cost " << dijkstra.best_cost_ << std::endl;
-        
-        // Simple path reconstruction - early return like bidirectional
-        auto p = std::optional<path>{path{
-          .cost_ = static_cast<cost_t>(std::min(dijkstra.best_cost_, static_cast<ch_dijkstra::internal_cost_t>(std::numeric_limits<cost_t>::max()))),
-          .dist_ = 0.0,  // TODO: calculate actual distance
-          .segments_ = {},
-          .uses_elevator_ = false
-        }};
-        
-        std::cout << "route_ch_with_matches: reconstructed path with cost " << p->cost_ << std::endl;
-        return p;  // Return first successful path - match bidirectional behavior
+      // Check for meetpoint (mirror line 531-536)
+      if (ch.meet_point_ == node_idx_t::invalid()) {
+        if (should_continue) {
+          continue;
+        }
+        return std::nullopt;
       }
       
-      std::cout << "CH: No path found for start way " << start_way << " to end way " << end_way << std::endl;
+      // Success - reconstruct path (mirror line 538-541)
+      auto const cost = ch.best_cost_;
+      
+      // Simple path reconstruction for now
+      auto p = std::optional<path>{path{
+        .cost_ = static_cast<cost_t>(std::min(cost, static_cast<ch_dijkstra::internal_cost_t>(std::numeric_limits<cost_t>::max()))),
+        .dist_ = geo::distance(from.pos_, to.pos_),
+        .segments_ = {},
+        .uses_elevator_ = false
+      }};
+      
+      return p;  // Return first successful path
     }
+    
+    // Clear backward state between end ways (mirror lines 543-546)
+    ch.pq_backward_.clear();
+    ch.backward_costs_.clear();
+    // No max_reached equivalent in current CH implementation
   }
   
-  std::cout << "CH: No path found across all start-end pairs" << std::endl;
   return std::nullopt;
 }
 

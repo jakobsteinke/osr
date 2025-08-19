@@ -39,7 +39,7 @@ struct ch_dijkstra {
   struct get_bucket {
     internal_cost_t operator()(ch_label const& l) { 
       // Mask off the backward bit for bucketing
-      return l.cost() & kCostMask;
+      return l.cost_ & kCostMask;  // Use cost_ directly, not cost() method
     }
   };
 
@@ -100,9 +100,14 @@ struct ch_dijkstra {
 
   void reset(cost_t const max) {
     pq_.clear();
-    // Allocate more buckets for CH - estimate larger costs from longer paths
-    auto const ch_max = static_cast<internal_cost_t>(max) * 20U; // Allow 20x larger costs
+    // Allocate more buckets for CH - must be large enough for all possible costs
+    // Use a minimum of 100000 buckets to handle shortcuts
+    auto const ch_max = std::max(static_cast<internal_cost_t>(100000), 
+                                  static_cast<internal_cost_t>(max) * 20U);
     pq_.n_buckets(ch_max + 1U);
+    if (kDebug) {
+      std::cout << "CH: Allocated " << (ch_max + 1U) << " buckets for dial queue\n";
+    }
     forward_costs_.clear();
     backward_costs_.clear();
     initial_forward_nodes_.clear();
@@ -209,34 +214,45 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Temporarily disable level filtering to test basic functionality
-          // if (ch && !ch->is_upward_edge(curr.n_, neighbor.n_)) {
-          //   return;
-          // }
+          // Re-enable level filtering for forward search
+          if (ch) {
+            car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
+            car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
+            if (!ch->is_upward_edge(curr_key, neighbor_key)) {
+              if (kDebug) {
+                std::cout << "  FILTERED edge (" << curr.n_ << "," << curr.way_ << ")->(" 
+                         << neighbor.n_ << "," << neighbor.way_ << ") (level " 
+                         << ch->get_level(curr_key) << " -> " 
+                         << ch->get_level(neighbor_key) << ")\n";
+              }
+              return;
+            }
+          }
           
-          // Disable regular edge debug output
-          // if (cost > 100) {  // Only debug expensive edges
-          //   std::cout << "  Regular edge curr=" << curr_cost << " + edge=" << cost << " = total=" << (curr_cost + cost) << std::endl;
-          // }
           process_edge(w, curr, neighbor, static_cast<internal_cost_t>(curr_cost + cost), max, true);
         });
 
-    // Temporarily disable shortcuts to test basic bidirectional search
-    // if (ch) {
-    //   auto const* shortcuts = ch->get_forward_shortcuts(curr.n_);
-    //   if (shortcuts) {
-    //     for (auto const& sc : *shortcuts) {
-    //       if (ch->is_upward_edge(curr.n_, sc.to_)) {
-    //         if (sc.cost_ < 50) {  // Only debug moderately cheap shortcuts
-    //           std::cout << "  Shortcut cost=" << sc.cost_ << " total=" << (curr_cost + sc.cost_) << std::endl;
-    //         }
-    //         car::resolve_all(r, sc.to_, level_t{static_cast<std::uint8_t>(0U)}, [&](node const target) {
-    //           process_edge(w, curr, target, static_cast<internal_cost_t>(curr_cost + sc.cost_), max, true);
-    //         });
-    //       }
-    //     }
-    //   }
-    // }
+    // Process shortcuts from current car state
+    if (ch) {
+      car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
+      auto const* shortcuts = ch->get_forward_shortcuts(curr_key);
+      if (shortcuts) {
+        for (auto const& sc : *shortcuts) {
+          // Re-enable level filtering for forward shortcuts
+          if (ch->is_upward_edge(curr_key, sc.to_)) {
+            if (kDebug) {
+              std::cout << "  SHORTCUT (" << curr.n_ << "," << curr.way_ << ")->(" 
+                       << sc.to_.n_ << "," << sc.to_.way_ << ") cost=" << sc.cost_ 
+                       << " (level " << ch->get_level(curr_key) << " -> " 
+                       << ch->get_level(sc.to_) << ")\n";
+            }
+            // Create proper target car node from shortcut
+            auto target = node{sc.to_.n_, sc.to_.way_, sc.to_.dir_};
+            process_edge(w, curr, target, static_cast<internal_cost_t>(curr_cost + sc.cost_), max, true);
+          }
+        }
+      }
+    }
   }
 
   template <bool WithBlocked>
@@ -256,27 +272,46 @@ struct ch_dijkstra {
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const) {
           
-          // Temporarily disable level filtering to test basic functionality
-          // if (ch && !ch->is_upward_edge(curr.n_, neighbor.n_)) {
-          //   return;
-          // }
+          // Re-enable level filtering for backward search (downward edges)
+          if (ch) {
+            car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
+            car_ch_key neighbor_key{neighbor.n_, neighbor.way_, neighbor.dir_};
+            // For backward search, we want downward edges (opposite of forward search)
+            if (!ch->is_upward_edge(neighbor_key, curr_key)) {
+              if (kDebug) {
+                std::cout << "  FILTERED edge (" << curr.n_ << "," << curr.way_ << ")->(" 
+                         << neighbor.n_ << "," << neighbor.way_ << ") (level " 
+                         << ch->get_level(curr_key) << " -> " 
+                         << ch->get_level(neighbor_key) << ")\n";
+              }
+              return;
+            }
+          }
           
           process_edge(w, curr, neighbor, static_cast<internal_cost_t>(curr_cost + cost), max, false);
         });
 
-    // Temporarily disable shortcuts to test basic bidirectional search  
-    // if (ch) {
-    //   auto const* shortcuts = ch->get_backward_shortcuts(curr.n_);
-    //   if (shortcuts) {
-    //     for (auto const& sc : *shortcuts) {
-    //       if (ch->is_upward_edge(curr.n_, sc.from_)) {
-    //         car::resolve_all(r, sc.from_, level_t{static_cast<std::uint8_t>(0U)}, [&](node const target) {
-    //           process_edge(w, curr, target, static_cast<internal_cost_t>(curr_cost + sc.cost_), max, false);
-    //         });
-    //       }
-    //     }
-    //   }
-    // }
+    // Process shortcuts from current car state
+    if (ch) {
+      car_ch_key curr_key{curr.n_, curr.way_, curr.dir_};
+      auto const* shortcuts = ch->get_backward_shortcuts(curr_key);
+      if (shortcuts) {
+        for (auto const& sc : *shortcuts) {
+          // Re-enable level filtering for backward shortcuts (reversed direction)
+          if (ch->is_upward_edge(curr_key, sc.from_)) {
+            if (kDebug) {
+              std::cout << "  SHORTCUT (" << curr.n_ << "," << curr.way_ << ")->(" 
+                       << sc.from_.n_ << "," << sc.from_.way_ << ") cost=" << sc.cost_ 
+                       << " (level " << ch->get_level(curr_key) << " -> " 
+                       << ch->get_level(sc.from_) << ")\n";
+            }
+            // Create proper target car node from shortcut
+            auto target = node{sc.from_.n_, sc.from_.way_, sc.from_.dir_};
+            process_edge(w, curr, target, static_cast<internal_cost_t>(curr_cost + sc.cost_), max, false);
+          }
+        }
+      }
+    }
   }
 
   void process_edge(ways const& w,

@@ -18,6 +18,12 @@ struct car_ch_key {
     return a.n_ == b.n_ && a.way_ == b.way_ && a.dir_ == b.dir_;
   }
   
+  friend bool operator<(car_ch_key const& a, car_ch_key const& b) {
+    if (a.n_ != b.n_) return a.n_ < b.n_;
+    if (a.way_ != b.way_) return a.way_ < b.way_;
+    return static_cast<int>(a.dir_) < static_cast<int>(b.dir_);
+  }
+  
   static car_ch_key invalid() {
     return car_ch_key{node_idx_t::invalid(), way_pos_t{0}, direction::kForward};
   }

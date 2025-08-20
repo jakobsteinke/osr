@@ -93,7 +93,7 @@ TEST(ch_speedup, actual_speedup_measurement) {
     // Time Dijkstra (multiple runs for accuracy)
     constexpr int num_runs = 5;
     std::vector<std::chrono::nanoseconds> dijkstra_run_times;
-    std::optional<route_result> dijkstra_result;
+    std::optional<path> dijkstra_result;
     
     for (int run = 0; run < num_runs; ++run) {
       auto const start = std::chrono::high_resolution_clock::now();
@@ -113,7 +113,7 @@ TEST(ch_speedup, actual_speedup_measurement) {
     
     // Time CH (multiple runs for accuracy)
     std::vector<std::chrono::nanoseconds> ch_run_times;
-    std::optional<route_result> ch_result;
+    std::optional<path> ch_result;
     
     for (int run = 0; run < num_runs; ++run) {
       auto const start = std::chrono::high_resolution_clock::now();

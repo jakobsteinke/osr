@@ -6,6 +6,7 @@
 #include <atomic>
 #include <mutex>
 #include <numeric>
+#include <unordered_set>
 
 #include "cista/mmap.h"
 #include "fmt/core.h"
@@ -343,7 +344,7 @@ TEST(dijkstra_astarbidir, ch_subgraph_simple) {
     
     successful_tests.emplace_back(from_node, to_node);
     fmt::println("Dijkstra: cost={}, dist={:.1f}m, segments={}", 
-                 dijkstra_result->cost_, dijkstra_result->dist_, dijkstra_result->path_.size());
+                 dijkstra_result->cost_, dijkstra_result->dist_, dijkstra_result->segments_.size());
   }
   
   if (successful_tests.empty()) {
@@ -372,7 +373,7 @@ TEST(dijkstra_astarbidir, ch_subgraph_simple) {
     
     if (dijkstra_result) {
       // Extract nodes from path
-      for (auto const& segment : dijkstra_result->path_) {
+      for (auto const& segment : dijkstra_result->segments_) {
         all_path_nodes.insert(segment.from_.v_);
         all_path_nodes.insert(segment.to_.v_);
       }

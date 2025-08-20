@@ -65,7 +65,7 @@ TEST(simple_speedup, measure_dijkstra_vs_ch) {
   
   // Measure Dijkstra
   std::vector<double> dijkstra_times_ms;
-  std::optional<route_result> dijkstra_result;
+  std::optional<path> dijkstra_result;
   
   for (int i = 0; i < num_runs; ++i) {
     auto const start = std::chrono::high_resolution_clock::now();
@@ -84,7 +84,7 @@ TEST(simple_speedup, measure_dijkstra_vs_ch) {
   
   // Measure CH
   std::vector<double> ch_times_ms;
-  std::optional<route_result> ch_result;
+  std::optional<path> ch_result;
   
   for (int i = 0; i < num_runs; ++i) {
     auto const start = std::chrono::high_resolution_clock::now();

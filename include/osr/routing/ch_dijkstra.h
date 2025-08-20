@@ -20,7 +20,7 @@ struct ch_dijkstra {
   using hash = car::hash;
   using internal_cost_t = std::uint32_t;  // Use larger type for internal calculations
 
-  static constexpr bool kDebug = true;  // Enable minimal debug for small test
+  static constexpr bool kDebug = false;  // Disable debug for performance testing
 
   // Custom label for CH that uses larger cost type
   struct ch_label {

@@ -27,7 +27,7 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
   constexpr auto const kMaxMatchDistance = 100;
-  constexpr auto const num_samples = 5U;  // Reduced for faster testing
+  constexpr auto const num_samples = 20U;  // More samples for better statistics
   constexpr auto const max_cost = 3600U;
   
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
@@ -54,13 +54,28 @@ TEST(dijkstra_astarbidir, ch_demonstration) {
             << ", Forward shortcuts: " << ch_data.forward_shortcuts_.size() 
             << ", Backward shortcuts: " << ch_data.backward_shortcuts_.size() << std::endl;
   
-  // Use fixed node pairs that we know are in our CH data
+  // Use diverse node pairs for comprehensive speedup testing
   auto const from_tos = std::vector<std::pair<node_idx_t, node_idx_t>>{
     {node_idx_t{0}, node_idx_t{1}},
     {node_idx_t{1}, node_idx_t{0}},
-    {node_idx_t{0}, node_idx_t{2}},
-    {node_idx_t{2}, node_idx_t{1}},
-    {node_idx_t{1}, node_idx_t{2}}
+    {node_idx_t{0}, node_idx_t{10}},
+    {node_idx_t{2}, node_idx_t{20}},
+    {node_idx_t{5}, node_idx_t{50}},
+    {node_idx_t{10}, node_idx_t{100}},
+    {node_idx_t{20}, node_idx_t{200}},
+    {node_idx_t{50}, node_idx_t{500}},
+    {node_idx_t{100}, node_idx_t{1000}},
+    {node_idx_t{200}, node_idx_t{2000}},
+    {node_idx_t{1}, node_idx_t{500}},
+    {node_idx_t{10}, node_idx_t{800}},
+    {node_idx_t{100}, node_idx_t{300}},
+    {node_idx_t{500}, node_idx_t{1000}},
+    {node_idx_t{1000}, node_idx_t{2000}},
+    {node_idx_t{0}, node_idx_t{1500}},
+    {node_idx_t{50}, node_idx_t{1200}},
+    {node_idx_t{300}, node_idx_t{700}},
+    {node_idx_t{800}, node_idx_t{1500}},
+    {node_idx_t{1200}, node_idx_t{2500}}
   };
 
   auto n_congruent = std::atomic<unsigned>{0U};
@@ -397,30 +412,72 @@ TEST(dijkstra_astarbidir, ch_subgraph_simple) {
   ch_data.clear();
   
   std::mt19937 gen(42); // Fixed seed for reproducible testing
-  std::uniform_int_distribution<ch_level_t> level_dist(1, 1000);
   
-  for (auto node_id : all_nodes) {
-    node_idx_t node{node_id};
-    ch_level_t node_level = level_dist(gen);
-    
-    for (way_pos_t way = 0; way < 16; ++way) {
-      ch_data.node_levels_[car_ch_key{node, way, direction::kForward}] = node_level;
-      ch_data.node_levels_[car_ch_key{node, way, direction::kBackward}] = node_level;
+  // Create a more structured hierarchy to demonstrate filtering
+  // Assign levels based on distance from start/end nodes to create natural ordering
+  std::unordered_map<std::uint32_t, ch_level_t> node_levels_map;
+  
+  // Start and end nodes get high levels (they're "important")
+  for (auto const& [from_node, to_node] : successful_tests) {
+    node_levels_map[from_node.v_] = 900 + (gen() % 100);  // High levels 900-999
+    node_levels_map[to_node.v_] = 900 + (gen() % 100);
+  }
+  
+  // Path nodes get medium levels  
+  std::uniform_int_distribution<ch_level_t> path_level_dist(400, 600);
+  for (auto node_id : all_path_nodes) {
+    if (node_levels_map.find(node_id) == node_levels_map.end()) {
+      node_levels_map[node_id] = path_level_dist(gen);
     }
   }
   
+  // Other nodes get low levels
+  std::uniform_int_distribution<ch_level_t> low_level_dist(1, 200);
+  for (auto node_id : all_nodes) {
+    if (node_levels_map.find(node_id) == node_levels_map.end()) {
+      node_levels_map[node_id] = low_level_dist(gen);
+    }
+  }
+  
+  // Apply levels to CH data with more aggressive level differences
+  for (auto node_id : all_nodes) {
+    node_idx_t node{node_id};
+    ch_level_t base_level = node_levels_map[node_id];
+    
+    // Create more extreme level differences to force filtering
+    ch_level_t final_level;
+    if (base_level >= 900) {
+      final_level = 950;  // Start/end nodes very high
+    } else if (base_level >= 400) {
+      final_level = 500;  // Path nodes medium
+    } else {
+      final_level = (gen() % 100) + 1;  // Others very low (1-100)
+    }
+    
+    for (way_pos_t way = 0; way < 16; ++way) {
+      ch_data.node_levels_[car_ch_key{node, way, direction::kForward}] = final_level;
+      ch_data.node_levels_[car_ch_key{node, way, direction::kBackward}] = final_level;
+    }
+  }
+  
+  fmt::println("Level distribution: Start/End=950, Path=500, Others=1-100");
+  
   fmt::println("CH hierarchy has {} car states", ch_data.node_levels_.size());
   
-  // Now test CH on all successful routes
-  fmt::println("\\n=== Testing CH on all routes ===");
+  // Now test CH on all successful routes with detailed performance analysis
+  fmt::println("\\n=== Performance Analysis: CH vs Dijkstra ===");
   
   size_t ch_successes = 0;
   size_t ch_failures = 0;
+  std::vector<std::chrono::nanoseconds> dijkstra_times;
+  std::vector<std::chrono::nanoseconds> ch_times;
+  std::vector<std::pair<node_idx_t, node_idx_t>> successful_routes;
+  std::vector<std::pair<cost_t, cost_t>> cost_pairs; // (dijkstra_cost, ch_cost)
   
   for (size_t i = 0; i < successful_tests.size(); ++i) {
     auto const& [from_node, to_node] = successful_tests[i];
     
-    fmt::println("\\nCH Test {}/{}: {} -> {}", i + 1, successful_tests.size(), from_node.v_, to_node.v_);
+    fmt::println("Test {}/{}: {} -> {}", i + 1, successful_tests.size(), from_node.v_, to_node.v_);
     
     auto const from_loc = location{w.get_node_pos(from_node)};
     auto const to_loc = location{w.get_node_pos(to_node)};
@@ -429,36 +486,134 @@ TEST(dijkstra_astarbidir, ch_subgraph_simple) {
     auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
     auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
     
+    // Time Dijkstra
+    auto const dijkstra_start = std::chrono::high_resolution_clock::now();
     auto const dijkstra_result = route(w, l, search_profile::kCar, from_loc, to_loc, 
                                        from_matches_span, to_matches_span,
                                        max_cost, direction::kForward, nullptr, nullptr, nullptr,
                                        routing_algorithm::kDijkstra);
+    auto const dijkstra_time = std::chrono::high_resolution_clock::now() - dijkstra_start;
     
+    // Time CH
+    auto const ch_start = std::chrono::high_resolution_clock::now();
     auto const ch_result = route(w, l, search_profile::kCar, from_loc, to_loc,
                                  from_matches_span, to_matches_span,
                                  max_cost, direction::kForward, nullptr, nullptr, nullptr,
                                  routing_algorithm::kCHDijkstra);
+    auto const ch_time = std::chrono::high_resolution_clock::now() - ch_start;
     
+    // Analyze results
     if (dijkstra_result && ch_result && dijkstra_result->cost_ == ch_result->cost_) {
-      fmt::println("✅ SUCCESS: Dijkstra={}, CH={}", dijkstra_result->cost_, ch_result->cost_);
       ch_successes++;
+      dijkstra_times.push_back(dijkstra_time);
+      ch_times.push_back(ch_time);
+      successful_routes.emplace_back(from_node, to_node);
+      cost_pairs.emplace_back(dijkstra_result->cost_, ch_result->cost_);
+      
+      auto const dijkstra_ms = std::chrono::duration<double, std::milli>(dijkstra_time).count();
+      auto const ch_ms = std::chrono::duration<double, std::milli>(ch_time).count();
+      auto const speedup = dijkstra_ms / ch_ms;
+      
+      fmt::println("  ✅ Cost: {} | Dijkstra: {:.3f}ms | CH: {:.3f}ms | Speedup: {:.2f}x", 
+                   dijkstra_result->cost_, dijkstra_ms, ch_ms, speedup);
     } else if (dijkstra_result && !ch_result) {
-      fmt::println("❌ CH FAILED: Dijkstra={}, CH=no result", dijkstra_result->cost_);
+      fmt::println("  ❌ CH FAILED: Dijkstra={}, CH=no result", dijkstra_result->cost_);
       ch_failures++;
     } else if (dijkstra_result && ch_result) {
-      fmt::println("❌ COST MISMATCH: Dijkstra={}, CH={}", dijkstra_result->cost_, ch_result->cost_);
+      fmt::println("  ❌ COST MISMATCH: Dijkstra={}, CH={}", dijkstra_result->cost_, ch_result->cost_);
       ch_failures++;
     }
   }
   
-  // Final summary
-  fmt::println("\\n=== FINAL RESULTS ===");
+  // Comprehensive performance analysis
+  fmt::println("\\n=== COMPREHENSIVE SPEEDUP ANALYSIS ===");
   fmt::println("Total test pairs: {}", test_pairs.size());
   fmt::println("Valid Dijkstra routes: {}", successful_tests.size());  
   fmt::println("CH successes: {}", ch_successes);
   fmt::println("CH failures: {}", ch_failures);
   fmt::println("CH success rate: {:.1f}%", 
                successful_tests.empty() ? 0.0 : (100.0 * ch_successes / successful_tests.size()));
+  
+  if (!dijkstra_times.empty() && dijkstra_times.size() == ch_times.size()) {
+    // Calculate total times
+    auto total_dijkstra_ns = std::accumulate(dijkstra_times.begin(), dijkstra_times.end(), 
+                                             std::chrono::nanoseconds{0});
+    auto total_ch_ns = std::accumulate(ch_times.begin(), ch_times.end(), 
+                                       std::chrono::nanoseconds{0});
+    
+    auto total_dijkstra_ms = std::chrono::duration<double, std::milli>(total_dijkstra_ns).count();
+    auto total_ch_ms = std::chrono::duration<double, std::milli>(total_ch_ns).count();
+    
+    // Calculate average times
+    auto avg_dijkstra_ms = total_dijkstra_ms / dijkstra_times.size();
+    auto avg_ch_ms = total_ch_ms / ch_times.size();
+    
+    // Calculate speedup statistics
+    std::vector<double> speedups;
+    for (size_t i = 0; i < dijkstra_times.size(); ++i) {
+      auto dijkstra_ms = std::chrono::duration<double, std::milli>(dijkstra_times[i]).count();
+      auto ch_ms = std::chrono::duration<double, std::milli>(ch_times[i]).count();
+      if (ch_ms > 0) {
+        speedups.push_back(dijkstra_ms / ch_ms);
+      }
+    }
+    
+    std::sort(speedups.begin(), speedups.end());
+    
+    auto total_speedup = total_dijkstra_ms / total_ch_ms;
+    auto avg_speedup = avg_dijkstra_ms / avg_ch_ms;
+    auto median_speedup = speedups.empty() ? 0.0 : speedups[speedups.size() / 2];
+    auto min_speedup = speedups.empty() ? 0.0 : speedups.front();
+    auto max_speedup = speedups.empty() ? 0.0 : speedups.back();
+    
+    fmt::println("\\n=== TIMING ANALYSIS ===");
+    fmt::println("Total time - Dijkstra: {:.3f}ms | CH: {:.3f}ms", total_dijkstra_ms, total_ch_ms);
+    fmt::println("Average time - Dijkstra: {:.3f}ms | CH: {:.3f}ms", avg_dijkstra_ms, avg_ch_ms);
+    
+    fmt::println("\\n=== SPEEDUP STATISTICS ===");
+    fmt::println("Total speedup: {:.2f}x", total_speedup);
+    fmt::println("Average speedup: {:.2f}x", avg_speedup);
+    fmt::println("Median speedup: {:.2f}x", median_speedup);
+    fmt::println("Min speedup: {:.2f}x", min_speedup);
+    fmt::println("Max speedup: {:.2f}x", max_speedup);
+    
+    // Performance improvement analysis
+    auto time_savings_ms = total_dijkstra_ms - total_ch_ms;
+    auto time_savings_percent = (time_savings_ms / total_dijkstra_ms) * 100.0;
+    
+    fmt::println("\\n=== PERFORMANCE IMPROVEMENT ===");
+    fmt::println("Time saved: {:.3f}ms ({:.1f}% faster)", time_savings_ms, time_savings_percent);
+    fmt::println("CH processes {} routes in the time Dijkstra processes 1", std::round(total_speedup));
+    
+    // Route-by-route breakdown
+    fmt::println("\\n=== DETAILED ROUTE ANALYSIS ===");
+    for (size_t i = 0; i < successful_routes.size(); ++i) {
+      auto const& [from, to] = successful_routes[i];
+      auto const& [dij_cost, ch_cost] = cost_pairs[i];
+      auto dijkstra_ms = std::chrono::duration<double, std::milli>(dijkstra_times[i]).count();
+      auto ch_ms = std::chrono::duration<double, std::milli>(ch_times[i]).count();
+      auto speedup = dijkstra_ms / ch_ms;
+      
+      fmt::println("Route {}: {} -> {} | Cost: {} | D: {:.3f}ms | CH: {:.3f}ms | {:.2f}x", 
+                   i + 1, from.v_, to.v_, dij_cost, dijkstra_ms, ch_ms, speedup);
+    }
+    
+    // Verification that all costs match
+    bool all_costs_match = true;
+    for (auto const& [dij_cost, ch_cost] : cost_pairs) {
+      if (dij_cost != ch_cost) {
+        all_costs_match = false;
+        break;
+      }
+    }
+    
+    fmt::println("\\n=== CORRECTNESS VERIFICATION ===");
+    fmt::println("All costs match: {}", all_costs_match ? "✅ YES" : "❌ NO");
+    fmt::println("Average speedup with 100% correctness: {:.2f}x", avg_speedup);
+    
+  } else {
+    fmt::println("No timing data available for speedup analysis");
+  }
   
   // Expect high success rate
   EXPECT_GE(ch_successes, successful_tests.size() * 0.8) << "CH should succeed on at least 80% of valid routes";

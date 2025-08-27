@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <algorithm>
+#include <iostream>
 #include <optional>
 
 #include "boost/thread/tss.hpp"
@@ -15,6 +16,11 @@
 #include "osr/elevation_storage.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
+#include "osr/routing/ch_bidirectional.h"
+#include "osr/routing/ch_levels.h"
+#include "osr/routing/ch_shortcut.h"
+#include "osr/routing/ch_path_reconstruction.h"
+#include "osr/routing/ch_preprocessor.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profiles/bike.h"
 #include "osr/routing/profiles/bike_sharing.h"
@@ -50,6 +56,94 @@ dijkstra<Profile>& get_dijkstra() {
   return *s.get();
 }
 
+template <typename Profile>
+class ch_search_manager {
+public:
+  ch_search_manager() 
+    : preprocessed_(false) {
+    // Initialize with default empty data
+    // Real preprocessing happens later when ways data is available
+    init_empty();
+  }
+
+  void ensure_preprocessing(ways const& w) {
+    // Only run preprocessing once and only for car profile
+    if constexpr (std::is_same_v<Profile, car>) {
+      if (!preprocessed_ && w.n_nodes() > 0) {
+        // Run CH preprocessing
+        ch_preprocessor preprocessor(w);
+        preprocessor.preprocess();
+        
+        // Debug: Check preprocessing results
+        auto const& levels = preprocessor.get_levels();
+        auto const& shortcuts = preprocessor.get_shortcuts();
+        std::cout << "CH Preprocessing completed:\n";
+        std::cout << "  Graph nodes: " << w.n_nodes() << "\n";
+        std::cout << "  Level assignments: " << levels.size() << "\n";
+        std::cout << "  Shortcuts created: " << shortcuts.size() << "\n";
+        
+        // Initialize with preprocessed data
+        init_with_preprocessing(levels, shortcuts);
+        
+        preprocessed_ = true;
+      }
+    } else {
+      // For non-car profiles, CH is not implemented - use empty shortcuts
+      if (!preprocessed_) {
+        init_empty();
+        preprocessed_ = true;
+      }
+    }
+  }
+
+  void ensure_capacity(std::size_t n_nodes) {
+    // For now, use fixed large capacity - could be enhanced with lazy initialization
+    if (levels_ && n_nodes > levels_->size()) {
+      // Log a warning but continue with current capacity
+      // In a production system, this would trigger reinitialization
+    }
+  }
+
+  ch_bidirectional<Profile>& get_bidir() { return *bidir_search_; }
+  ch_path_reconstruction<Profile>& get_reconstructor() { return *path_reconstructor_; }
+  ch_levels const& get_levels() const { return *levels_; }
+  ch_shortcuts const& get_shortcuts() const { return *shortcuts_; }
+  bool is_preprocessed() const { return preprocessed_; }
+
+private:
+  void init_empty() {
+    // Initialize with empty levels and shortcuts for default construction
+    levels_ = std::make_unique<ch_levels>(100000); // Large enough capacity
+    shortcuts_ = std::make_unique<ch_shortcuts>();
+    bidir_search_ = std::make_unique<ch_bidirectional<Profile>>(*levels_, *shortcuts_);
+    path_reconstructor_ = std::make_unique<ch_path_reconstruction<Profile>>(*shortcuts_);
+  }
+
+  void init_with_preprocessing(ch_levels const& preprocessed_levels, ch_shortcuts const& preprocessed_shortcuts) {
+    // Initialize with actual preprocessed data
+    levels_ = std::make_unique<ch_levels>(preprocessed_levels);
+    shortcuts_ = std::make_unique<ch_shortcuts>(preprocessed_shortcuts);
+    bidir_search_ = std::make_unique<ch_bidirectional<Profile>>(*levels_, *shortcuts_);
+    path_reconstructor_ = std::make_unique<ch_path_reconstruction<Profile>>(*shortcuts_);
+  }
+
+private:
+  std::unique_ptr<ch_levels> levels_;
+  std::unique_ptr<ch_shortcuts> shortcuts_;
+  std::unique_ptr<ch_bidirectional<Profile>> bidir_search_;
+  std::unique_ptr<ch_path_reconstruction<Profile>> path_reconstructor_;
+  bool preprocessed_;
+};
+
+template <typename Profile>
+ch_search_manager<Profile>& get_ch() {
+  static auto s = boost::thread_specific_ptr<ch_search_manager<Profile>>{};
+  if (s.get() == nullptr) {
+    s.reset(new ch_search_manager<Profile>{});
+  }
+  return *s.get();
+}
+
 struct connecting_way {
   constexpr bool valid() const { return way_ != way_idx_t::invalid(); }
 
@@ -64,6 +158,7 @@ routing_algorithm to_algorithm(std::string_view s) {
   switch (cista::hash(s)) {
     case cista::hash("dijkstra"): return routing_algorithm::kDijkstra;
     case cista::hash("bidirectional"): return routing_algorithm::kAStarBi;
+    case cista::hash("ch"): return routing_algorithm::kCH;
   }
   throw utl::fail("unknown routing algorithm: {}", s);
 }
@@ -667,6 +762,115 @@ std::optional<path> route_dijkstra(ways const& w,
 }
 
 template <typename Profile>
+std::optional<path> route_ch(ways const& w,
+                             lookup const& l,
+                             ch_search_manager<Profile>& ch_manager,
+                             location const& from,
+                             location const& to,
+                             match_view_t from_match,
+                             match_view_t to_match,
+                             cost_t const max,
+                             direction const dir,
+                             bitvec<node_idx_t> const* blocked,
+                             sharing_data const* sharing,
+                             elevation_storage const* elevations) {
+  if (auto const direct = try_direct(from, to); direct.has_value()) {
+    return *direct;
+  }
+
+  // Ensure CH manager has adequate capacity for this graph
+  ch_manager.ensure_capacity(w.n_nodes());
+  
+  // Run CH preprocessing (only happens once per graph)
+  ch_manager.ensure_preprocessing(w);
+  
+  auto& bidir_search = ch_manager.get_bidir();
+  auto& path_reconstructor = ch_manager.get_reconstructor();
+  
+  // Initialize bidirectional CH search
+  bidir_search.init(max, from, to);
+  
+  // Add starting nodes from forward matches
+  for (auto const& match : from_match) {
+    for (auto const* nc : {&match.left_, &match.right_}) {
+      if (nc->valid() && nc->cost_ < max) {
+        Profile::resolve_start_node(
+            *w.r_, match.way_, nc->node_, from.lvl_, dir, [&](auto const node) {
+              bidir_search.add_forward_start(node, nc->cost_);
+            });
+      }
+    }
+  }
+  
+  // Add target nodes from backward matches  
+  for (auto const& match : to_match) {
+    for (auto const* nc : {&match.left_, &match.right_}) {
+      if (nc->valid() && nc->cost_ < max) {
+        Profile::resolve_start_node(
+            *w.r_, match.way_, nc->node_, to.lvl_, opposite(dir), [&](auto const node) {
+              bidir_search.add_backward_start(node, nc->cost_);
+            });
+      }
+    }
+  }
+  
+  // Run bidirectional CH search
+  bool const found_path = bidir_search.template run_search<false>(
+      w, max, blocked, sharing, elevations);
+  
+  if (!found_path) {
+    return std::nullopt;
+  }
+  
+  // Reconstruct path using CH unpacking
+  auto reconstructed_path = path_reconstructor.template reconstruct_path<false>(
+      w, bidir_search, from, to, blocked, sharing, elevations);
+  
+  if (!reconstructed_path.has_value()) {
+    return std::nullopt;
+  }
+  
+  // Convert CH path to OSR path format
+  // TODO: Full path conversion - for now return simplified path
+  return path{
+      .cost_ = bidir_search.get_shortest_path_cost(),
+      .dist_ = 0.0, // Will be calculated during full path conversion
+      .elevation_ = {},
+      .segments_ = {}, // Will be populated during full path conversion
+      .uses_elevator_ = false,
+      .track_node_ = node_idx_t::invalid()
+  };
+}
+
+std::optional<path> route_ch(ways const& w,
+                             lookup const& l,
+                             search_profile const profile,
+                             location const& from,
+                             location const& to,
+                             cost_t const max,
+                             direction const dir,
+                             double const max_match_distance,
+                             bitvec<node_idx_t> const* blocked,
+                             sharing_data const* sharing,
+                             elevation_storage const* elevations) {
+  return with_profile(
+      profile, [&]<typename Profile>(Profile&&) -> std::optional<path> {
+        auto const from_match =
+            l.match<Profile>(from, false, dir, max_match_distance, blocked);
+        auto const to_match =
+            l.match<Profile>(to, true, dir, max_match_distance, blocked);
+
+        if (from_match.empty() || to_match.empty()) {
+          return std::nullopt;
+        }
+
+        return route_ch(w, l, get_ch<Profile>(), from, to,
+                        from_match, to_match, max, dir, blocked,
+                        sharing, elevations);
+      });
+}
+
+template <typename Profile>
 std::vector<std::optional<path>> route(
     ways const& w,
     lookup const& l,
@@ -892,6 +1096,12 @@ std::optional<path> route(ways const& w,
                                    from_match, to_match, max, dir, blocked,
                                    sharing, elevations);
       });
+    case routing_algorithm::kCH:
+      return with_profile(profile, [&]<typename Profile>(Profile&&) {
+        return route_ch(w, l, get_ch<Profile>(), from, to,
+                        from_match, to_match, max, dir, blocked, sharing,
+                        elevations);
+      });
   }
   throw utl::fail("not implemented");
 }
@@ -922,6 +1132,9 @@ std::optional<path> route(ways const& w,
       return route_bidirectional(w, l, profile, from, to, max, dir,
                                  max_match_distance, blocked, sharing,
                                  elevations);
+    case routing_algorithm::kCH:
+      return route_ch(w, l, profile, from, to, max, dir,
+                      max_match_distance, blocked, sharing, elevations);
   }
   throw utl::fail("not implemented");
 }

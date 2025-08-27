@@ -1,0 +1,379 @@
+#include "gtest/gtest.h"
+
+#include <chrono>
+#include <filesystem>
+#include <iostream>
+
+#include "cista/mmap.h"
+#include "fmt/core.h"
+
+#include "osr/extract/extract.h"
+#include "osr/lookup.h"
+#include "osr/platforms.h"
+#include "osr/routing/algorithms.h"
+#include "osr/routing/route.h"
+#include "osr/ways.h"
+
+namespace fs = std::filesystem;
+using namespace osr;
+
+namespace {
+
+void ensure_monaco_data(std::string_view raw_data, std::string_view data_dir) {
+  if (!fs::exists(data_dir)) {
+    if (fs::exists(raw_data)) {
+      auto const p = fs::path{data_dir};
+      auto ec = std::error_code{};
+      fs::remove_all(p, ec);
+      fs::create_directories(p, ec);
+      osr::extract(false, raw_data, data_dir, fs::path{});
+    }
+  }
+}
+
+}  // namespace
+
+class CHRoutingTest : public ::testing::Test {
+public:
+  void SetUp() override {
+    raw_data_ = "test/monaco.osm.pbf";
+    data_dir_ = "test/monaco";
+
+    if (!fs::exists(raw_data_) && !fs::exists(data_dir_)) {
+      GTEST_SKIP() << raw_data_ << " not found";
+    }
+
+    ensure_monaco_data(raw_data_, data_dir_);
+    ways_ = std::make_unique<ways>(data_dir_, cista::mmap::protection::READ);
+    lookup_ = std::make_unique<lookup>(*ways_, data_dir_, cista::mmap::protection::READ);
+  }
+
+protected:
+  std::string raw_data_;
+  std::string data_dir_;
+  std::unique_ptr<ways> ways_;
+  std::unique_ptr<lookup> lookup_;
+};
+
+// Basic CH routing functionality test
+TEST_F(CHRoutingTest, basic_ch_routing) {
+  ASSERT_NE(ways_, nullptr);
+  ASSERT_NE(lookup_, nullptr);
+
+  // Monaco Casino to Monaco-Ville (approximate coordinates)
+  auto const from_loc = location{geo::latlng{43.7396, 7.4263}};  // Casino area
+  auto const to_loc = location{geo::latlng{43.7313, 7.4186}};    // Monaco-Ville
+
+  auto const ch_result = route(*ways_, *lookup_, search_profile::kCar, 
+                               from_loc, to_loc, cost_t{3600},
+                               direction::kForward, 100.0,
+                               nullptr, nullptr, nullptr,
+                               routing_algorithm::kCH);
+
+  EXPECT_TRUE(ch_result.has_value());
+  if (ch_result.has_value()) {
+    EXPECT_GT(ch_result->cost_, cost_t{0});
+    EXPECT_FALSE(ch_result->segments_.empty());
+    
+    fmt::println("CH Route: cost={} duration={}s segments={}", 
+                 ch_result->cost_.v_, ch_result->cost_.v_, ch_result->segments_.size());
+  }
+}
+
+// Compare CH with Dijkstra and A* for correctness
+TEST_F(CHRoutingTest, ch_correctness_comparison) {
+  ASSERT_NE(ways_, nullptr);
+
+  // Test multiple routes
+  std::vector<std::pair<geo::latlng, geo::latlng>> test_coordinates = {
+    // Casino to Station  
+    {{43.7396, 7.4263}, {43.7313, 7.4186}},
+    // Monte Carlo to Port Hercule
+    {{43.7391, 7.4256}, {43.7314, 7.4205}},
+    // Fontvieille to Monaco-Ville
+    {{43.7275, 7.4156}, {43.7313, 7.4186}}
+  };
+
+  for (auto const& [from_coords, to_coords] : test_coordinates) {
+    auto const from_loc = location{from_coords};
+    auto const to_loc = location{to_coords};
+
+    auto const ch_result = route(*ways_, *lookup_, search_profile::kCar,
+                                 from_loc, to_loc, cost_t{3600},
+                                 direction::kForward, 100.0,
+                                 nullptr, nullptr, nullptr,
+                                 routing_algorithm::kCH);
+    
+    auto const dijkstra_result = route(*ways_, *lookup_, search_profile::kCar,
+                                       from_loc, to_loc, cost_t{3600},
+                                       direction::kForward, 100.0,
+                                       nullptr, nullptr, nullptr,
+                                       routing_algorithm::kDijkstra);
+
+    auto const astar_result = route(*ways_, *lookup_, search_profile::kCar,
+                                    from_loc, to_loc, cost_t{3600},
+                                    direction::kForward, 100.0,
+                                    nullptr, nullptr, nullptr,
+                                    routing_algorithm::kBidirectionalAStar);
+
+    // All algorithms should agree on path existence
+    EXPECT_EQ(ch_result.has_value(), dijkstra_result.has_value());
+    EXPECT_EQ(ch_result.has_value(), astar_result.has_value());
+    
+    if (ch_result.has_value() && dijkstra_result.has_value() && astar_result.has_value()) {
+      // All should find optimal paths (same cost)
+      EXPECT_EQ(ch_result->cost_, dijkstra_result->cost_)
+        << "CH vs Dijkstra cost mismatch";
+      EXPECT_EQ(ch_result->cost_, astar_result->cost_)
+        << "CH vs A* cost mismatch";
+        
+      fmt::println("Route {:.4f},{:.4f} -> {:.4f},{:.4f}: CH={} Dijkstra={} A*={}", 
+                   from_coords.lat_, from_coords.lng_,
+                   to_coords.lat_, to_coords.lng_,
+                   ch_result->cost_.v_, dijkstra_result->cost_.v_, astar_result->cost_.v_);
+    }
+  }
+}
+
+// Performance comparison test
+TEST_F(CHRoutingTest, ch_performance) {
+  ASSERT_NE(ways_, nullptr);
+
+  auto const from = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const to = place{location{geo::latlng{43.7313, 7.4186}}, {}};
+
+  constexpr int num_runs = 5;
+  
+  // Warmup
+  route(*ways_, from, to, search_profile::kCar, direction::kForward, {}, {}, {},
+        routing_algorithm::kCH);
+  route(*ways_, from, to, search_profile::kCar, direction::kForward, {}, {}, {},
+        routing_algorithm::kDijkstra);
+
+  // Time CH
+  auto ch_total_time = std::chrono::microseconds{0};
+  std::optional<path> ch_result;
+  
+  for (int i = 0; i < num_runs; ++i) {
+    auto const start = std::chrono::high_resolution_clock::now();
+    ch_result = route(*ways_, from, to, search_profile::kCar,
+                      direction::kForward, {}, {}, {},
+                      routing_algorithm::kCH);
+    auto const end = std::chrono::high_resolution_clock::now();
+    ch_total_time += std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  }
+
+  // Time Dijkstra  
+  auto dijkstra_total_time = std::chrono::microseconds{0};
+  std::optional<path> dijkstra_result;
+  
+  for (int i = 0; i < num_runs; ++i) {
+    auto const start = std::chrono::high_resolution_clock::now();
+    dijkstra_result = route(*ways_, from, to, search_profile::kCar,
+                            direction::kForward, {}, {}, {},
+                            routing_algorithm::kDijkstra);
+    auto const end = std::chrono::high_resolution_clock::now();
+    dijkstra_total_time += std::chrono::duration_cast<std::chrono::microseconds>(end - start);
+  }
+
+  auto const ch_avg = ch_total_time.count() / num_runs;
+  auto const dijkstra_avg = dijkstra_total_time.count() / num_runs;
+  
+  EXPECT_TRUE(ch_result.has_value());
+  EXPECT_TRUE(dijkstra_result.has_value());
+  
+  if (ch_result.has_value() && dijkstra_result.has_value()) {
+    EXPECT_EQ(ch_result->cost_, dijkstra_result->cost_);
+    
+    auto const speedup = static_cast<double>(dijkstra_avg) / static_cast<double>(ch_avg);
+    fmt::println("Performance (avg of {} runs): CH={}μs Dijkstra={}μs Speedup={:.2f}x", 
+                 num_runs, ch_avg, dijkstra_avg, speedup);
+    
+    // CH should be at least as fast as Dijkstra (ideally faster)
+    // Allow some tolerance for small graphs like Monaco where overhead might dominate
+    EXPECT_LE(ch_avg, dijkstra_avg * 2) << "CH should not be much slower than Dijkstra";
+  }
+}
+
+// Test CH with blocked nodes
+TEST_F(CHRoutingTest, ch_with_blocked_nodes) {
+  ASSERT_NE(ways_, nullptr);
+
+  auto const from = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const to = place{location{geo::latlng{43.7313, 7.4186}}, {}};
+
+  // Get normal route first
+  auto const normal_result = route(*ways_, from, to, search_profile::kCar,
+                                   direction::kForward, {}, {}, {},
+                                   routing_algorithm::kCH);
+
+  ASSERT_TRUE(normal_result.has_value());
+  
+  // Create blocked nodes
+  bitvec<node_idx_t> blocked_nodes(ways_->n_nodes());
+  
+  // Block some nodes (simulate road closures)
+  std::vector<node_idx_t> nodes_to_block;
+  for (std::uint32_t i = 0; i < std::min(ways_->n_nodes(), 100U); i += 20) {
+    nodes_to_block.emplace_back(i);
+    blocked_nodes.set(node_idx_t{i}, true);
+  }
+
+  auto const blocked_result = route(*ways_, from, to, search_profile::kCar,
+                                    direction::kForward, {}, {}, {},
+                                    routing_algorithm::kCH, 
+                                    cost_t::max(), &blocked_nodes);
+
+  // Compare with Dijkstra under same conditions
+  auto const dijkstra_blocked = route(*ways_, from, to, search_profile::kCar,
+                                      direction::kForward, {}, {}, {},
+                                      routing_algorithm::kDijkstra, 
+                                      cost_t::max(), &blocked_nodes);
+
+  // Both should agree on path existence
+  EXPECT_EQ(blocked_result.has_value(), dijkstra_blocked.has_value());
+  
+  if (blocked_result.has_value() && dijkstra_blocked.has_value()) {
+    EXPECT_EQ(blocked_result->cost_, dijkstra_blocked->cost_);
+    
+    fmt::println("Blocked routing: Normal={} CH_blocked={} Dijkstra_blocked={}", 
+                 normal_result->cost_.v_, blocked_result->cost_.v_, dijkstra_blocked->cost_.v_);
+  }
+}
+
+// Test edge cases
+TEST_F(CHRoutingTest, ch_edge_cases) {
+  ASSERT_NE(ways_, nullptr);
+
+  // Same start and end
+  auto const same_loc = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const same_result = route(*ways_, same_loc, same_loc, search_profile::kCar,
+                                 direction::kForward, {}, {}, {},
+                                 routing_algorithm::kCH);
+  
+  if (same_result.has_value()) {
+    EXPECT_EQ(same_result->cost_, cost_t{0});
+  }
+
+  // Very close points (should find short route or handle gracefully)
+  auto const close_from = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const close_to = place{location{geo::latlng{43.7397, 7.4264}}, {}};   // ~100m away
+  
+  auto const close_result = route(*ways_, close_from, close_to, search_profile::kCar,
+                                  direction::kForward, {}, {}, {},
+                                  routing_algorithm::kCH);
+  
+  if (close_result.has_value()) {
+    EXPECT_GT(close_result->cost_, cost_t{0});
+    EXPECT_LT(close_result->cost_, cost_t{300}); // Should be very short route
+  }
+}
+
+// Test different directions
+TEST_F(CHRoutingTest, ch_bidirectional_directions) {
+  ASSERT_NE(ways_, nullptr);
+
+  auto const from = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const to = place{location{geo::latlng{43.7313, 7.4186}}, {}};
+
+  // Forward direction
+  auto const forward_result = route(*ways_, from, to, search_profile::kCar,
+                                    direction::kForward, {}, {}, {},
+                                    routing_algorithm::kCH);
+
+  // Backward direction (reverse start and end)
+  auto const backward_result = route(*ways_, to, from, search_profile::kCar,
+                                     direction::kForward, {}, {}, {},
+                                     routing_algorithm::kCH);
+
+  EXPECT_EQ(forward_result.has_value(), backward_result.has_value());
+  
+  if (forward_result.has_value() && backward_result.has_value()) {
+    // Costs might differ due to one-way streets and turn restrictions
+    fmt::println("Bidirectional test: Forward={} Backward={}", 
+                 forward_result->cost_.v_, backward_result->cost_.v_);
+  }
+}
+
+// Test multiple profiles (car should work, others might not be implemented yet)
+TEST_F(CHRoutingTest, ch_profile_support) {
+  ASSERT_NE(ways_, nullptr);
+
+  auto const from = place{location{geo::latlng{43.7396, 7.4263}}, {}};
+  auto const to = place{location{geo::latlng{43.7313, 7.4186}}, {}};
+
+  // Car profile should work
+  auto const car_result = route(*ways_, from, to, search_profile::kCar,
+                                direction::kForward, {}, {}, {},
+                                routing_algorithm::kCH);
+  
+  EXPECT_TRUE(car_result.has_value()) << "CH should support car profile";
+
+  // Other profiles - test graceful handling
+  auto const foot_result = route(*ways_, from, to, search_profile::kFoot,
+                                 direction::kForward, {}, {}, {},
+                                 routing_algorithm::kCH);
+  
+  // Either works or fails gracefully (no crash)
+  if (foot_result.has_value()) {
+    fmt::println("CH foot routing works: cost={}", foot_result->cost_.v_);
+  } else {
+    fmt::println("CH foot routing not implemented (expected)");
+  }
+}
+
+// Stress test with many random routes
+TEST_F(CHRoutingTest, ch_stress_test) {
+  ASSERT_NE(ways_, nullptr);
+
+  constexpr int num_tests = 20;
+  std::vector<std::pair<geo::latlng, geo::latlng>> random_coords;
+  
+  // Generate random coordinates within Monaco bounds
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::uniform_real_distribution<> lat_dist(43.72, 43.75);  // Monaco latitude range
+  std::uniform_real_distribution<> lng_dist(7.41, 7.44);    // Monaco longitude range
+  
+  for (int i = 0; i < num_tests; ++i) {
+    random_coords.emplace_back(
+      geo::latlng{lat_dist(gen), lng_dist(gen)},
+      geo::latlng{lat_dist(gen), lng_dist(gen)}
+    );
+  }
+
+  int successful_routes = 0;
+  int matching_costs = 0;
+  
+  for (auto const& [from_coords, to_coords] : random_coords) {
+    auto const from = place{location{from_coords}, {}};
+    auto const to = place{location{to_coords}, {}};
+
+    auto const ch_result = route(*ways_, from, to, search_profile::kCar,
+                                 direction::kForward, {}, {}, {},
+                                 routing_algorithm::kCH);
+    
+    auto const dijkstra_result = route(*ways_, from, to, search_profile::kCar,
+                                       direction::kForward, {}, {}, {},
+                                       routing_algorithm::kDijkstra);
+
+    if (ch_result.has_value()) {
+      ++successful_routes;
+      
+      if (dijkstra_result.has_value() && ch_result->cost_ == dijkstra_result->cost_) {
+        ++matching_costs;
+      }
+    }
+  }
+  
+  fmt::println("Stress test results: {}/{} successful routes, {}/{} cost matches", 
+               successful_routes, num_tests, matching_costs, successful_routes);
+  
+  // At least 70% of random routes should succeed
+  EXPECT_GE(successful_routes, static_cast<int>(num_tests * 0.7));
+  
+  // At least 90% of successful routes should match Dijkstra costs  
+  if (successful_routes > 0) {
+    EXPECT_GE(matching_costs, static_cast<int>(successful_routes * 0.9));
+  }
+}

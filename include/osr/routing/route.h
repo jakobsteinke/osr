@@ -53,6 +53,12 @@ bidirectional<Profile>& get_bidirectional();
 template <typename Profile>
 dijkstra<Profile>& get_dijkstra();
 
+template <typename Profile>
+class ch_search_manager; // Forward declaration
+
+template <typename Profile>
+ch_search_manager<Profile>& get_ch();
+
 std::vector<std::optional<path>> route(
     ways const&,
     lookup const&,

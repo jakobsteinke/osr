@@ -1,0 +1,256 @@
+#include "gtest/gtest.h"
+#include "fmt/format.h"
+#include <filesystem>
+
+#include "osr/routing/ch_edge_expansion.h"
+#include "osr/routing/ch_levels.h"
+#include "osr/routing/ch_shortcut.h"
+#include "osr/routing/profiles/car.h"
+#include "osr/ways.h"
+
+namespace fs = std::filesystem;
+
+namespace osr {
+
+// Helper function to load Monaco data - skip if not available
+void load_monaco_data_for_expansion(std::string const& raw_data, std::string const& data_dir) {
+  // For now, just check if the processed data already exists
+  // We'll skip the extract functionality since it's not available in tests
+  if (!fs::exists(data_dir + "/ways.bin")) {
+    throw std::runtime_error("Monaco test data not available - run main extract first");
+  }
+}
+
+TEST(ch_edge_expansion, level_filtering_basic) {
+  // Create simple test setup
+  constexpr std::size_t n_nodes = 5;
+  ch_levels levels(n_nodes);
+  ch_shortcuts shortcuts;
+  ch_edge_expansion expander(levels, shortcuts);
+
+  // Test level filtering logic
+  for (std::uint32_t i = 0; i < n_nodes; ++i) {
+    for (std::uint32_t j = 0; j < n_nodes; ++j) {
+      node_idx_t const from{i};
+      node_idx_t const to{j};
+
+      bool const expected_allowed = levels.is_higher_level(to, from);
+      bool const actual_allowed = expander.is_ch_edge_allowed(from, to);
+
+      EXPECT_EQ(actual_allowed, expected_allowed)
+          << "Edge (" << i << " -> " << j << ") level filtering mismatch. "
+          << "From level: " << levels.get_level(from) 
+          << ", To level: " << levels.get_level(to);
+    }
+  }
+}
+
+TEST(ch_edge_expansion, shortcut_integration) {
+  ch_levels levels(5);
+  ch_shortcuts shortcuts;
+  ch_edge_expansion expander(levels, shortcuts);
+
+  // Add some test shortcuts
+  shortcuts.add_shortcut(node_idx_t{0}, node_idx_t{4}, node_idx_t{2}, cost_t{100});
+  shortcuts.add_shortcut(node_idx_t{1}, node_idx_t{3}, node_idx_t{0}, cost_t{80});
+
+  EXPECT_EQ(shortcuts.size(), 2);
+  
+  // Verify shortcuts exist and expander can access them
+  auto const best_shortcut = shortcuts.get_best_shortcut(node_idx_t{0}, node_idx_t{4});
+  ASSERT_TRUE(best_shortcut.has_value());
+  EXPECT_EQ(best_shortcut->cost_, cost_t{100});
+  EXPECT_EQ(best_shortcut->via_, node_idx_t{2});
+}
+
+TEST(ch_edge_expansion, monaco_edge_expansion) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  // Load Monaco data
+  load_monaco_data_for_expansion(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  
+  fmt::println("Testing CH edge expansion on Monaco dataset ({} nodes)", w.n_nodes());
+  
+  // Create CH levels and expander
+  ch_levels levels(w.n_nodes());
+  ch_shortcuts shortcuts; // Empty for this test
+  ch_edge_expansion expander(levels, shortcuts);
+  
+  // Test expansion from a few nodes
+  std::size_t nodes_tested = 0;
+  std::size_t total_edges_found = 0;
+  std::size_t ch_filtered_edges = 0;
+  
+  for (std::uint32_t i = 0; i < std::min(w.n_nodes(), 50U) && nodes_tested < 10; ++i) {
+    node_idx_t const test_node{i};
+    
+    // Try to resolve this node to car::node
+    std::vector<car::node> car_nodes;
+    car::resolve_all(*w.r_, test_node, level_t{0.0F}, [&](car::node const node) {
+      car_nodes.push_back(node);
+    });
+    
+    if (car_nodes.empty()) continue;
+    
+    ++nodes_tested;
+    auto const current = car_nodes[0]; // Use first car node
+    
+    fmt::println("\nTesting expansion from node {} (OSM: {}, Level: {})", 
+                 test_node.v_, w.node_to_osm_[test_node], levels.get_level(test_node));
+    
+    std::size_t regular_neighbors = 0;
+    std::size_t ch_allowed_neighbors = 0;
+    
+    // Count regular neighbors
+    car::adjacent<direction::kForward, false>(
+        *w.r_, current, nullptr, nullptr, nullptr,
+        [&](car::node const neighbor, std::uint32_t const cost, distance_t,
+            way_idx_t, std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool) {
+          ++regular_neighbors;
+          ++total_edges_found;
+        });
+    
+    // Count CH-filtered neighbors
+    expander.expand_ch_edges<direction::kForward, false>(
+        w, current, level_t{0.0F}, nullptr, nullptr, nullptr,
+        [&](car::node const neighbor, std::uint32_t const cost, distance_t,
+            way_idx_t, std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool) {
+          ++ch_allowed_neighbors;
+          ++ch_filtered_edges;
+          
+          // Verify level constraint
+          EXPECT_TRUE(expander.is_ch_edge_allowed(current.get_node(), neighbor.get_node()))
+              << "CH expansion returned invalid edge: " 
+              << current.get_node().v_ << " -> " << neighbor.get_node().v_;
+        });
+    
+    fmt::println("  Regular neighbors: {} | CH-allowed neighbors: {} | Filtered: {}", 
+                 regular_neighbors, ch_allowed_neighbors, regular_neighbors - ch_allowed_neighbors);
+    
+    // CH filtering should reduce the number of edges (usually around 50% for random levels)
+    EXPECT_LE(ch_allowed_neighbors, regular_neighbors);
+  }
+  
+  fmt::println("\nSummary:");
+  fmt::println("  Nodes tested: {}", nodes_tested);
+  fmt::println("  Total edges found: {}", total_edges_found);
+  fmt::println("  CH-allowed edges: {}", ch_filtered_edges);
+  
+  if (total_edges_found > 0) {
+    fmt::println("  CH filtering efficiency: {:.1f}%", 
+                 100.0 * ch_filtered_edges / total_edges_found);
+  }
+  
+  EXPECT_GT(nodes_tested, 0);
+  EXPECT_GT(total_edges_found, 0);
+}
+
+TEST(ch_edge_expansion, bidirectional_consistency) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load_monaco_data_for_expansion(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  
+  ch_levels levels(w.n_nodes());
+  ch_shortcuts shortcuts;
+  ch_edge_expansion expander(levels, shortcuts);
+  
+  fmt::println("Testing bidirectional consistency on Monaco dataset");
+  
+  // Test that both directions use upward edges
+  std::size_t forward_edges = 0;
+  std::size_t backward_edges = 0;
+  
+  for (std::uint32_t i = 0; i < std::min(w.n_nodes(), 20U); ++i) {
+    node_idx_t const test_node{i};
+    
+    std::vector<car::node> car_nodes;
+    car::resolve_all(*w.r_, test_node, level_t{0.0F}, [&](car::node const node) {
+      car_nodes.push_back(node);
+    });
+    
+    if (car_nodes.empty()) continue;
+    auto const current = car_nodes[0];
+    
+    // Count forward CH edges
+    expander.expand_ch_edges<direction::kForward, false>(
+        w, current, level_t{0.0F}, nullptr, nullptr, nullptr,
+        [&](car::node const neighbor, std::uint32_t, distance_t,
+            way_idx_t, std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool) {
+          ++forward_edges;
+          // Verify upward edge
+          EXPECT_TRUE(levels.is_higher_level(neighbor.get_node(), current.get_node()))
+              << "Forward search found non-upward edge";
+        });
+    
+    // Count backward CH edges  
+    expander.expand_ch_edges<direction::kBackward, false>(
+        w, current, level_t{0.0F}, nullptr, nullptr, nullptr,
+        [&](car::node const neighbor, std::uint32_t, distance_t,
+            way_idx_t, std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool) {
+          ++backward_edges;
+          // Verify upward edge (backward also goes up!)
+          EXPECT_TRUE(levels.is_higher_level(neighbor.get_node(), current.get_node()))
+              << "Backward search found non-upward edge";
+        });
+    
+    if (forward_edges + backward_edges > 100) break; // Limit test size
+  }
+  
+  fmt::println("  Forward CH edges: {}", forward_edges);
+  fmt::println("  Backward CH edges: {}", backward_edges);
+  
+  EXPECT_GT(forward_edges, 0);
+  EXPECT_GT(backward_edges, 0);
+}
+
+TEST(ch_edge_expansion, level_constraint_validation) {
+  ch_levels levels(10);
+  ch_shortcuts shortcuts;
+  ch_edge_expansion expander(levels, shortcuts);
+
+  // Verify level constraint for all node pairs
+  std::size_t upward_edges = 0;
+  std::size_t total_pairs = 0;
+  
+  for (std::uint32_t i = 0; i < 10; ++i) {
+    for (std::uint32_t j = 0; j < 10; ++j) {
+      if (i != j) {
+        ++total_pairs;
+        if (expander.is_ch_edge_allowed(node_idx_t{i}, node_idx_t{j})) {
+          ++upward_edges;
+          
+          // Verify this is indeed a higher-level edge
+          EXPECT_TRUE(levels.is_higher_level(node_idx_t{j}, node_idx_t{i}))
+              << "CH edge allowed but not higher level: " << i << " -> " << j;
+        }
+      }
+    }
+  }
+  
+  fmt::println("Level constraint validation:");
+  fmt::println("  Total node pairs: {}", total_pairs);
+  fmt::println("  Upward edges allowed: {}", upward_edges);
+  fmt::println("  CH filtering rate: {:.1f}%", 100.0 * upward_edges / total_pairs);
+  
+  // With random levels, roughly 50% of edges should be upward
+  EXPECT_GT(upward_edges, total_pairs / 3); // At least 33%
+  EXPECT_LT(upward_edges, total_pairs * 2 / 3); // At most 67%
+}
+
+}  // namespace osr

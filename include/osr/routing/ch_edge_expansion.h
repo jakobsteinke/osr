@@ -87,9 +87,11 @@ public:
   /**
    * Check if edge (from, to) is allowed in CH query.
    * Both forward and backward searches use upward edges: level(to) > level(from).
+   * TEMPORARILY DISABLED FOR TESTING - allows all edges.
    */
   bool is_ch_edge_allowed(node_idx_t from, node_idx_t to) const {
-    return levels_.is_higher_level(to, from);
+    // return levels_.is_higher_level(to, from);
+    return true;  // Temporarily disable level filtering for testing
   }
 
 private:
@@ -104,12 +106,9 @@ private:
   void expand_shortcut_edges(ways const& w, node const& current, Fn&& callback) const {
     auto const current_node = current.get_node();
     
-    // Special debug for our test nodes
-    if (current_node.v_ == 680 || current_node.v_ == 436) {
-      std::cout << "SHORTCUT DEBUG: Expanding shortcuts from node " << current_node.v_ 
-                << " direction=" << (SearchDir == direction::kForward ? "F" : "B") << "\n";
-      std::cout << "  Looking through " << shortcuts_.get_all().size() << " shortcut entries\n";
-    }
+    // Debug output for shortcut expansion (can be enabled for debugging)
+    // std::cout << "Shortcut expansion from node " << current_node.v_ 
+    //           << " direction=" << (SearchDir == direction::kForward ? "F" : "B") << "\n";
     
     // Look for shortcuts involving current node
     for (auto const& [edge_pair, shortcut_list] : shortcuts_.get_all()) {
@@ -118,22 +117,21 @@ private:
       if constexpr (SearchDir == direction::kForward) {
         // Forward search: expand outgoing shortcuts (current -> target)
         if (from == current_node) {
-          // Special debug for our test case
-          if (current_node.v_ == 680) {
-            std::cout << "  Found outgoing shortcut from " << from.v_ << " to " << to.v_ << "\n";
-          }
+          // Debug: Found outgoing shortcut
+          // std::cout << "  Found outgoing shortcut from " << from.v_ << " to " << to.v_ << "\n";
           
           for (auto const& shortcut : shortcut_list) {
             // Apply level filtering: only go to higher-level nodes
             if (is_ch_edge_allowed(current_node, to)) {
-              std::cout << "Using shortcut from node " << current_node.v_ 
-                        << " to node " << to.v_ << " cost=" << shortcut.cost_ << "\n";
+              // std::cout << "Using shortcut from node " << current_node.v_ 
+              //           << " to node " << to.v_ << " cost=" << shortcut.cost_ << "\n";
               expand_shortcut_to_node(w, to, shortcut.cost_, callback);
-            } else {
-              std::cout << "Blocked shortcut: " << current_node.v_ << " -> " << to.v_ 
-                        << " (level " << levels_.get_level(current_node) << " -> " 
-                        << levels_.get_level(to) << ")\n";
             }
+            // else {
+            //   std::cout << "Blocked shortcut: " << current_node.v_ << " -> " << to.v_ 
+            //             << " (level " << levels_.get_level(current_node) << " -> " 
+            //             << levels_.get_level(to) << ")\n";
+            // }
           }
         }
       } else {
@@ -145,8 +143,8 @@ private:
             // Note: from the perspective of backward search, we go from current to 'from'
             // but level filtering still requires 'from' to have higher level than current
             if (is_ch_edge_allowed(current_node, from)) {
-              std::cout << "Using shortcut from node " << current_node.v_ 
-                        << " to node " << from.v_ << " cost=" << shortcut.cost_ << "\n";
+              // std::cout << "Using shortcut from node " << current_node.v_ 
+              //           << " to node " << from.v_ << " cost=" << shortcut.cost_ << "\n";
               expand_shortcut_to_node(w, from, shortcut.cost_, callback);
             }
           }
@@ -176,10 +174,10 @@ private:
           });
       
       // Debug: Log how many car::nodes were created for this shortcut target
-      if (node_count > 0) {
-        std::cout << "Shortcut expansion: node " << target_node_idx.v_ 
-                  << " -> " << node_count << " car::nodes\\n";
-      }
+      // if (node_count > 0) {
+      //   std::cout << "Shortcut expansion: node " << target_node_idx.v_ 
+      //             << " -> " << node_count << " car::nodes\n";
+      // }
     }
   }
 

@@ -201,19 +201,19 @@ private:
         ? backward_search_.get_cost(expanded_node)
         : forward_search_.get_cost(expanded_node);
     
-    // Debug output for meeting point checks
-    std::cout << "Meeting check: node " << expanded_node.get_node().v_ 
-              << " dir=" << (search_dir == direction::kForward ? "F" : "B")
-              << " expanded_cost=" << expanded_cost 
-              << " other_cost=" << (other_cost == kInfeasible ? -1 : other_cost) << "\n";
+    // Debug output for meeting point checks (can be enabled for debugging)
+    // std::cout << "Meeting check: node " << expanded_node.get_node().v_ 
+    //           << " dir=" << (search_dir == direction::kForward ? "F" : "B")
+    //           << " expanded_cost=" << expanded_cost 
+    //           << " other_cost=" << (other_cost == kInfeasible ? -1 : other_cost) << "\n";
 
     if (other_cost != kInfeasible) {
       // Both searches have reached this exact car::node - direct meeting point
       auto const forward_cost = (search_dir == direction::kForward) ? expanded_cost : other_cost;
       auto const backward_cost = (search_dir == direction::kForward) ? other_cost : expanded_cost;
       
-      std::cout << "MEETING POINT FOUND at node " << expanded_node.get_node().v_ 
-                << " fwd_cost=" << forward_cost << " bwd_cost=" << backward_cost << "\n";
+      // std::cout << "MEETING POINT FOUND at node " << expanded_node.get_node().v_ 
+      //           << " fwd_cost=" << forward_cost << " bwd_cost=" << backward_cost << "\n";
       evaluate_direct_meetpoint(expanded_node, forward_cost, backward_cost, search_dir);
     }
     
@@ -231,16 +231,16 @@ private:
                                  direction const search_dir) {
     auto const total_cost = forward_cost + backward_cost;
     
-    std::cout << "Evaluating meeting point: total_cost=" << total_cost 
-              << " current_best=" << tentative_shortest_path_ << "\n";
+    // std::cout << "Evaluating meeting point: total_cost=" << total_cost 
+    //           << " current_best=" << tentative_shortest_path_ << "\n";
     
     if (total_cost < tentative_shortest_path_) {
       tentative_shortest_path_ = total_cost;
       forward_meeting_node_ = meeting_node;
       backward_meeting_node_ = meeting_node;
       
-      std::cout << "NEW BEST PATH found via node " << meeting_node.get_node().v_ 
-                << " cost=" << total_cost << "\n";
+      // std::cout << "NEW BEST PATH found via node " << meeting_node.get_node().v_ 
+      //           << " cost=" << total_cost << "\n";
     }
   }
 
@@ -255,11 +255,11 @@ private:
         ? backward_search_.get_distances()
         : forward_search_.get_distances();
         
-    // Only log if opposite search has found nodes
-    if (opposite_distances.size() > 0) {
-      std::cout << "End-of-way check: node " << expanded_node.get_node().v_ 
-                << " vs " << opposite_distances.size() << " opposite nodes\\n";
-    }
+    // Debug: End-of-way check (can be enabled for debugging)
+    // if (opposite_distances.size() > 0) {
+    //   std::cout << "End-of-way check: node " << expanded_node.get_node().v_ 
+    //             << " vs " << opposite_distances.size() << " opposite nodes\n";
+    // }
 
     // Look for any car::node on the same node_idx_t that the opposite search reached
     auto const target_node_idx = expanded_node.get_node();
@@ -294,8 +294,8 @@ private:
         if (other_cost == kInfeasible) {
           // The expanded_node car::node doesn't match the entry - try to find a compatible one
           if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
-            std::cout << "Entry scan for node " << key_node_idx.v_ 
-                      << " (expanded from dir " << (search_dir == direction::kForward ? "F" : "B") << ")\\n";
+            // std::cout << "Entry scan for node " << key_node_idx.v_ 
+            //           << " (expanded from dir " << (search_dir == direction::kForward ? "F" : "B") << ")\n";
             
             // For car profile, try to find any car::node on this node_idx_t that has a valid cost
             // We'll iterate through the entry to find the minimum valid cost
@@ -310,7 +310,7 @@ private:
               }
             }
             
-            std::cout << "  Entry has " << valid_costs << " valid costs, min=" << min_cost << "\\n";
+            // std::cout << "  Entry has " << valid_costs << " valid costs, min=" << min_cost << "\n";
             
             if (min_cost != kInfeasible) {
               other_cost = min_cost;
@@ -318,10 +318,10 @@ private:
               other_meeting_node = expanded_node;  // Copy structure
               other_meeting_node.n_ = key;         // Replace node_idx_t
               
-              std::cout << "Found compatible meeting via entry scan: node " << key_node_idx.v_ 
-                        << " cost=" << other_cost << "\\n";
+              // std::cout << "Found compatible meeting via entry scan: node " << key_node_idx.v_ 
+              //           << " cost=" << other_cost << "\n";
             } else {
-              std::cout << "  No valid costs in entry, skipping\\n";
+              // std::cout << "  No valid costs in entry, skipping\n";
               continue; // No valid cost found in this entry
             }
           } else {
@@ -335,8 +335,8 @@ private:
         if (other_cost != kInfeasible) {
           auto const total_cost = expanded_cost + other_cost;
           
-          std::cout << "End-of-way meeting candidate: node " << key_node_idx.v_ 
-                    << " total_cost=" << total_cost << " current_best=" << tentative_shortest_path_ << "\n";
+          // std::cout << "End-of-way meeting candidate: node " << key_node_idx.v_ 
+          //           << " total_cost=" << total_cost << " current_best=" << tentative_shortest_path_ << "\n";
           
           if (total_cost < tentative_shortest_path_) {
             tentative_shortest_path_ = total_cost;
@@ -349,8 +349,8 @@ private:
               backward_meeting_node_ = expanded_node;
             }
             
-            std::cout << "NEW BEST END-OF-WAY PATH found at node " << key_node_idx.v_ 
-                      << " cost=" << total_cost << "\n";
+            // std::cout << "NEW BEST END-OF-WAY PATH found at node " << key_node_idx.v_ 
+            //           << " cost=" << total_cost << "\n";
           }
         }
       }

@@ -45,6 +45,19 @@ für Down-Graph.
 
 ---
 
+The crucial part for connectivity is this: Let's say there exists a shortest path P that goes through the nodes u->v->w. Without loss of generality we assume that our forward search is currently at node u and our backward search is currently at node w. Let's go through all possible level assignments:
+1.: level(u) > level(v) > level(w): in that case our backward search can just take all inverted edges and the two searches meet at node u. 
+2.: level(u) < level(v) < level(w): in that case our forward search can just take all normal edges and the two searches meet at node w. 
+3.: level(u) < level(v) > level(w): forward search takes edge (u, v), backward search takes (inverted) edge (w, v), both searches meet at v
+4.: level(u) > level(v) < level(w): We assume that P is a shortest path, therefore the preproceesing must have produces a shortcut (u, w) via v because level(u) > level(v) and level(w) > level(v) and we did not find any witness, since P is a shortest path and every subpath of P is also a shortest subpath. If level(u) < level(w), the forward search can take this shortcut (u, w), so both searches meet at node w. If level(u) > level(w), the backward search can take the inverted shortcut (w, u), so both searches meet at node u.
+
+Hence Level Filtering should work like this: 
+- Forward search: level filtering level(to) > level(from) (upward) ✅
+- Backward search: level filtering level(from) > level(to) (downward) ✅
+
+when contracting nodes, you must already consider existing shortcuts as normal edges of the graph. When you add shortcuts, you must already consider existing shortcuts. So when there is an edge (v, u) and a    shortcut (u, w) and level(v) > level(u) < level(w), create a shortcut from v to w. Test that the added shortcuts are          visible for the creation of other shortcuts.     
+The contraction must be ordered by node ordering (so first contract node with lowest level etc.)                                                                         
+
 ## 1) Preprocessing (CH construction)
 
 First we have to determine a node ordering, each node should get a different level. For this project, the node ordering must be random, so with *n* nodes, each node must get a unique random level between 1 and *n*. This node ordering defines a total order `<`.

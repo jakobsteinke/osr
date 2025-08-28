@@ -57,11 +57,13 @@ public:
           
           original_edges_found++;
           
-          // Apply CH level filtering: only allow edges to higher-level nodes
-          if (is_ch_edge_allowed(current.get_node(), neighbor.get_node())) {
-            original_edges_allowed++;
-            callback(neighbor, cost, dist, way, way_pos_from, way_pos_to, elevation, uses_elevator);
-          }
+          // RoutingKit-style: For direct edges, we still need level filtering
+        // since we can't pre-filter all original graph edges efficiently
+        // TODO: In full RoutingKit implementation, even original edges would be pre-separated
+        if (is_ch_edge_allowed<SearchDir>(current.get_node(), neighbor.get_node())) {
+          original_edges_allowed++;
+          callback(neighbor, cost, dist, way, way_pos_from, way_pos_to, elevation, uses_elevator);
+        }
         });
     
     int shortcuts_found = 0;
@@ -74,79 +76,107 @@ public:
       callback(args...);
     });
     
-    // Temporarily disable debug output
-    // Debug output for edge expansion
-    // if (original_edges_found > 0 || shortcuts_found > 0) {
-    //   std::cout << "CH Edge Expansion - Node:" << current.get_node().v_ 
-    //             << " Dir:" << (SearchDir == direction::kForward ? "F" : "B")
-    //             << " Original:" << original_edges_allowed << "/" << original_edges_found
-    //             << " Shortcuts:" << shortcuts_allowed << "/" << shortcuts_found << "\n";
-    // }
+    // Debug output for first test only to see search patterns
+    static int debug_test = 0;
+    static int expansion_count = 0;
+    
+    if (debug_test == 0 && expansion_count < 15) {
+      expansion_count++;
+      std::cout << "DEBUG " << expansion_count << " - Node:" << current.get_node().v_ 
+                << " Level:" << levels_.get_level(current.get_node())
+                << " Dir:" << (SearchDir == direction::kForward ? "F" : "B")
+                << " Orig:" << original_edges_allowed << "/" << original_edges_found
+                << " Short:" << shortcuts_allowed << "/" << shortcuts_found;
+      
+      // Show what neighbors we actually expand to
+      if (shortcuts_allowed > 0 || original_edges_allowed > 0) {
+        std::cout << " -> EXPANDING";
+      } else {
+        std::cout << " -> BLOCKED";
+      }
+      std::cout << "\n";
+      
+      if (expansion_count >= 15) {
+        std::cout << "=== STOPPING DEBUG OUTPUT ===\n";
+        debug_test = 1;  // Stop further debug output
+      }
+    }
   }
 
   /**
-   * Check if edge (from, to) is allowed in CH query.
-   * Both forward and backward searches use upward edges: level(to) > level(from).
-   * TEMPORARILY DISABLED FOR TESTING - allows all edges.
+   * Check if edge (from, to) is allowed in CH query based on search direction.
+   * 
+   * RoutingKit-style implementation with relaxed filtering for original graph edges.
+   * Shortcut edges are already pre-filtered during preprocessing, but original
+   * graph edges still need some filtering since we can't efficiently pre-separate them all.
    */
+  template <direction SearchDir>
   bool is_ch_edge_allowed(node_idx_t from, node_idx_t to) const {
-    // return levels_.is_higher_level(to, from);
-    return true;  // Temporarily disable level filtering for testing
+    // RELAXED FILTERING for better connectivity with random ordering
+    // This allows the searches to have more overlap while maintaining hierarchy benefits
+    
+    auto const from_level = levels_.get_level(from);
+    auto const to_level = levels_.get_level(to);
+    
+    if constexpr (SearchDir == direction::kForward) {
+      // Forward search: prefer upward moves but allow limited downward for connectivity
+      if (to_level > from_level) {
+        return true;  // Always allow upward moves
+      }
+      // Allow limited downward moves to improve connectivity
+      return false;
+      //return (from_level - to_level) <= 100;  // Configurable tolerance
+    } else {
+      // Backward search: prefer downward moves but allow limited upward for connectivity  
+      if (from_level > to_level) {
+        return true;  // Always allow downward moves (backward search logic)
+      }
+      return false;
+      // Allow limited upward moves to improve connectivity
+      //return (to_level - from_level) <= 100;  // Configurable tolerance
+    }
+  }
+  
+  // Legacy method for compatibility - now properly delegates to template version
+  bool is_ch_edge_allowed(node_idx_t from, node_idx_t to) const {
+    // Default to forward search behavior for legacy calls
+    return is_ch_edge_allowed<direction::kForward>(from, to);
   }
 
 private:
   /**
-   * Expand shortcut edges from current node.
-   * Following the working Python CH implementation:
-   * - Forward search: find shortcuts FROM current node (outgoing shortcuts)
-   * - Backward search: find shortcuts TO current node (incoming shortcuts) 
-   * Both maintain upward level filtering: only go to higher-level nodes.
+   * Expand shortcut edges from current node using RoutingKit-style direction-specific graphs.
+   * Forward search uses forward graph (pre-filtered upward edges).
+   * Backward search uses backward graph (pre-filtered downward edges).
+   * No runtime level filtering needed - it's "baked in" during preprocessing.
    */
   template <direction SearchDir, typename Fn>
   void expand_shortcut_edges(ways const& w, node const& current, Fn&& callback) const {
     auto const current_node = current.get_node();
     
-    // Debug output for shortcut expansion (can be enabled for debugging)
-    // std::cout << "Shortcut expansion from node " << current_node.v_ 
-    //           << " direction=" << (SearchDir == direction::kForward ? "F" : "B") << "\n";
-    
-    // Look for shortcuts involving current node
-    for (auto const& [edge_pair, shortcut_list] : shortcuts_.get_all()) {
-      auto const [from, to] = edge_pair;
-      
-      if constexpr (SearchDir == direction::kForward) {
-        // Forward search: expand outgoing shortcuts (current -> target)
+    if constexpr (SearchDir == direction::kForward) {
+      // Forward search: use forward shortcuts graph (pre-filtered upward edges)
+      for (auto const& [edge_pair, shortcut_list] : shortcuts_.get_forward_shortcuts()) {
+        auto const [from, to] = edge_pair;
+        
         if (from == current_node) {
-          // Debug: Found outgoing shortcut
-          // std::cout << "  Found outgoing shortcut from " << from.v_ << " to " << to.v_ << "\n";
-          
+          // Found outgoing shortcut from current node
           for (auto const& shortcut : shortcut_list) {
-            // Apply level filtering: only go to higher-level nodes
-            if (is_ch_edge_allowed(current_node, to)) {
-              // std::cout << "Using shortcut from node " << current_node.v_ 
-              //           << " to node " << to.v_ << " cost=" << shortcut.cost_ << "\n";
-              expand_shortcut_to_node(w, to, shortcut.cost_, callback);
-            }
-            // else {
-            //   std::cout << "Blocked shortcut: " << current_node.v_ << " -> " << to.v_ 
-            //             << " (level " << levels_.get_level(current_node) << " -> " 
-            //             << levels_.get_level(to) << ")\n";
-            // }
+            // No level filtering needed - forward graph is already filtered
+            expand_shortcut_to_node(w, to, shortcut.cost_, callback);
           }
         }
-      } else {
-        // Backward search: expand incoming shortcuts (source -> current)
-        // This follows Python logic: backward search uses predecessors
+      }
+    } else {
+      // Backward search: use backward shortcuts graph (pre-filtered downward edges)
+      for (auto const& [edge_pair, shortcut_list] : shortcuts_.get_backward_shortcuts()) {
+        auto const [from, to] = edge_pair;
+        
         if (to == current_node) {
+          // Found incoming shortcut to current node (reversed direction)
           for (auto const& shortcut : shortcut_list) {
-            // Apply level filtering: only go to higher-level nodes
-            // Note: from the perspective of backward search, we go from current to 'from'
-            // but level filtering still requires 'from' to have higher level than current
-            if (is_ch_edge_allowed(current_node, from)) {
-              // std::cout << "Using shortcut from node " << current_node.v_ 
-              //           << " to node " << from.v_ << " cost=" << shortcut.cost_ << "\n";
-              expand_shortcut_to_node(w, from, shortcut.cost_, callback);
-            }
+            // No level filtering needed - backward graph is already filtered
+            expand_shortcut_to_node(w, from, shortcut.cost_, callback);
           }
         }
       }

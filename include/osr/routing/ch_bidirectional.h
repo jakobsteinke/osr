@@ -55,6 +55,8 @@ public:
    */
   void add_forward_start(node const& start_node, cost_t const initial_cost = cost_t{0}) {
     forward_search_.add_start(start_node, initial_cost);
+    std::cout << "Forward start node: " << start_node.get_node().v_ 
+              << " level: " << levels_.get_level(start_node.get_node()) << "\n";
   }
 
   /**
@@ -62,6 +64,8 @@ public:
    */
   void add_backward_start(node const& end_node, cost_t const initial_cost = cost_t{0}) {
     backward_search_.add_start(end_node, initial_cost);
+    std::cout << "Backward start node: " << end_node.get_node().v_ 
+              << " level: " << levels_.get_level(end_node.get_node()) << "\n";
   }
 
   /**
@@ -105,14 +109,70 @@ public:
 
     search_finished_ = true;
     
+    // With Python-style termination (run to completion), the existing meeting point detection
+    // during search will naturally find the optimal meeting point among all reachable nodes.
+    
     // Show search summary
     auto const fwd_explored = forward_search_.get_distances().size();
     auto const bwd_explored = backward_search_.get_distances().size();
     bool const found_path = tentative_shortest_path_ != kInfeasible;
     
+    // Debug: Show explored node sets to check for overlap
+    ankerl::unordered_dense::set<node_idx_t> fwd_nodes, bwd_nodes;
+    int overlaps = 0;
+    
+    for (auto const& [key, entry] : forward_search_.get_distances()) {
+      node_idx_t node_idx;
+      if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
+        node_idx = key;
+      } else if constexpr (requires { key.n_; }) {
+        node_idx = key.n_;
+      } else if constexpr (requires { key.get_node(); }) {
+        node_idx = key.get_node();
+      } else {
+        continue;
+      }
+      fwd_nodes.insert(node_idx);
+    }
+    
+    for (auto const& [key, entry] : backward_search_.get_distances()) {
+      node_idx_t node_idx;
+      if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
+        node_idx = key;
+      } else if constexpr (requires { key.n_; }) {
+        node_idx = key.n_;
+      } else if constexpr (requires { key.get_node(); }) {
+        node_idx = key.get_node();
+      } else {
+        continue;
+      }
+      if (fwd_nodes.count(node_idx)) {
+        overlaps++;
+      }
+      bwd_nodes.insert(node_idx);
+    }
+    
     std::cout << "SEARCH SUMMARY - Fwd: " << fwd_explored 
               << " nodes, Bwd: " << bwd_explored << " nodes, "
+              << "Overlaps: " << overlaps << ", "
               << (found_path ? "PATH FOUND" : "NO PATH") << "\n";
+    
+    // Show some explored nodes for debugging
+    if (fwd_explored <= 10 && bwd_explored <= 10) {
+      std::cout << "Fwd nodes: ";
+      int count = 0;
+      for (auto node : fwd_nodes) {
+        if (count++ < 5) std::cout << node.v_ << " ";
+      }
+      if (fwd_nodes.size() > 5) std::cout << "...";
+      std::cout << "\nBwd nodes: ";
+      count = 0;
+      for (auto node : bwd_nodes) {
+        if (count++ < 5) std::cout << node.v_ << " ";
+      }
+      if (bwd_nodes.size() > 5) std::cout << "...";
+      std::cout << "\n";
+    }
     
     // if (fwd_explored > 0 || bwd_explored > 0) {  // Show all searches
     //   std::cout << "CH Search Debug - Fwd: " << fwd_explored 
@@ -358,38 +418,25 @@ private:
   }
 
   /**
-   * Check if search should terminate using abort-on-success criterion.
-   * Terminates when both search frontiers exceed the tentative shortest path.
+   * Check if search should terminate using Python-style logic.
+   * Runs both searches to completion, then finds optimal meeting point.
    */
   bool should_terminate() const {
-    if (tentative_shortest_path_ == kInfeasible) {
-      return false; // No meeting point found yet
-    }
-
-    // Check if both searches are exhausted
+    // PYTHON-STYLE TERMINATION: Run both searches to completion
+    // This matches Python's approach where both searches run until queues are empty,
+    // then the optimal meeting point is found among ALL reachable nodes.
+    //
+    // Python logic (lines 251-282):
+    // while pq_start or pq_end:
+    //   # Run both searches to completion
+    //
+    // This is critical for strict level filtering to work correctly!
+    
     auto const forward_finished = !forward_search_.has_next();
     auto const backward_finished = !backward_search_.has_next();
-
-    if (forward_finished && backward_finished) {
-      return true; // Both searches completely exhausted
-    }
-
-    // Apply abort-on-success criterion:
-    // Terminate when both search frontiers have minimum costs exceeding tentative shortest path
-    auto const forward_next_cost = forward_search_.get_next_cost();
-    auto const backward_next_cost = backward_search_.get_next_cost();
-
-    // If either search is finished, only check the other
-    if (forward_finished) {
-      return backward_next_cost >= tentative_shortest_path_;
-    }
-    if (backward_finished) {
-      return forward_next_cost >= tentative_shortest_path_;
-    }
-
-    // Both searches are active - check both frontiers
-    return forward_next_cost >= tentative_shortest_path_ && 
-           backward_next_cost >= tentative_shortest_path_;
+    
+    // Only terminate when BOTH searches are completely exhausted
+    return forward_finished && backward_finished;
   }
 
 private:

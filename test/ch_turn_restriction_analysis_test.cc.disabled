@@ -1,0 +1,233 @@
+#ifdef _WIN32
+#include "windows.h"
+#endif
+
+#include "gtest/gtest.h"
+
+#include <filesystem>
+#include <random>
+#include <chrono>
+#include <iostream>
+#include <numeric>
+
+#include "cista/mmap.h"
+#include "fmt/core.h"
+
+#include "osr/extract/extract.h"
+#include "osr/location.h"
+#include "osr/lookup.h"
+#include "osr/routing/profiles/car.h"
+#include "osr/routing/profiles/simple.h"
+#include "osr/routing/ch_bidirectional.h"
+#include "osr/routing/ch_preprocessor.h"
+#include "osr/routing/dijkstra.h"
+#include "osr/types.h"
+#include "osr/ways.h"
+
+namespace fs = std::filesystem;
+using namespace osr;
+
+constexpr auto const kMaxMatchDistance = 100;
+
+void load_monaco_data() {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+  
+  if (!fs::exists(data_dir)) {
+    if (fs::exists(raw_data)) {
+      auto const p = fs::path{data_dir};
+      auto ec = std::error_code{};
+      fs::remove_all(p, ec);
+      fs::create_directories(p, ec);
+      osr::extract(false, raw_data, data_dir, fs::path{});
+    }
+  }
+}
+
+template<typename Profile>
+struct ch_performance_stats {
+  std::string profile_name;
+  size_t preprocessing_time_ms;
+  size_t shortcuts_created;
+  double avg_query_time_ms;
+  size_t avg_nodes_explored_forward;
+  size_t avg_nodes_explored_backward;
+  size_t paths_found;
+  size_t total_queries;
+};
+
+template<typename Profile>
+ch_performance_stats<Profile> measure_ch_performance(
+    ways const& w, 
+    std::string const& profile_name,
+    std::vector<std::pair<node_idx_t, node_idx_t>> const& query_pairs) {
+  
+  ch_performance_stats<Profile> stats;
+  stats.profile_name = profile_name;
+  
+  std::cout << "=== CH Performance Analysis: " << profile_name << " ===" << std::endl;
+  
+  // Preprocessing phase
+  auto const start_prep = std::chrono::high_resolution_clock::now();
+  
+  ch_preprocessor preprocessor(w);
+  preprocessor.preprocess();
+  
+  auto const end_prep = std::chrono::high_resolution_clock::now();
+  stats.preprocessing_time_ms = std::chrono::duration_cast<std::chrono::milliseconds>(end_prep - start_prep).count();
+  stats.shortcuts_created = preprocessor.get_shortcuts().size();
+  
+  std::cout << "Preprocessing completed:" << std::endl;
+  std::cout << "  Time: " << stats.preprocessing_time_ms << "ms" << std::endl;
+  std::cout << "  Shortcuts created: " << stats.shortcuts_created << std::endl;
+  
+  // Query phase
+  ch_bidirectional<Profile> ch_search(preprocessor.get_levels(), preprocessor.get_shortcuts());
+  
+  std::vector<double> query_times;
+  std::vector<size_t> forward_nodes_explored;
+  std::vector<size_t> backward_nodes_explored;
+  stats.paths_found = 0;
+  
+  std::cout << "Running " << query_pairs.size() << " test queries..." << std::endl;
+  
+  for (size_t i = 0; i < query_pairs.size() && i < 10; ++i) {  // Limit to 10 queries for analysis
+    auto const& [source, target] = query_pairs[i];
+    
+    auto const start_query = std::chrono::high_resolution_clock::now();
+    
+    // Initialize search for this query (dummy locations since we're using node indices directly)
+    location dummy_start{.pos_ = {0.0F, 0.0F}};
+    location dummy_end{.pos_ = {1.0F, 1.0F}};
+    ch_search.init(cost_t{3600}, dummy_start, dummy_end);
+    
+    // Add source nodes
+    Profile::resolve_all(*w.r_, source, level_t{0.0F}, 
+        [&](typename Profile::node const& start_node) {
+          ch_search.add_forward_start(start_node, cost_t{0});
+        });
+    
+    // Add target nodes  
+    Profile::resolve_all(*w.r_, target, level_t{0.0F},
+        [&](typename Profile::node const& target_node) {
+          ch_search.add_backward_start(target_node, cost_t{0});
+        });
+    
+    // Run search
+    bool found_path = ch_search.template run_search<false>(w, cost_t{3600}, nullptr, nullptr, nullptr);
+    
+    auto const end_query = std::chrono::high_resolution_clock::now();
+    auto const query_time_ms = std::chrono::duration<double, std::milli>(end_query - start_query).count();
+    
+    query_times.push_back(query_time_ms);
+    forward_nodes_explored.push_back(ch_search.get_forward_distances().size());
+    backward_nodes_explored.push_back(ch_search.get_backward_distances().size());
+    
+    if (found_path) {
+      stats.paths_found++;
+    }
+    
+    std::cout << "Query " << (i+1) << ": " 
+              << (found_path ? "PATH" : "NO_PATH") 
+              << " (Fwd: " << ch_search.get_forward_distances().size() 
+              << ", Bwd: " << ch_search.get_backward_distances().size()
+              << ", " << query_time_ms << "ms)" << std::endl;
+  }
+  
+  // Calculate averages
+  stats.total_queries = std::min(query_pairs.size(), size_t{10});
+  stats.avg_query_time_ms = std::accumulate(query_times.begin(), query_times.end(), 0.0) / query_times.size();
+  stats.avg_nodes_explored_forward = std::accumulate(forward_nodes_explored.begin(), forward_nodes_explored.end(), 0UL) / forward_nodes_explored.size();
+  stats.avg_nodes_explored_backward = std::accumulate(backward_nodes_explored.begin(), backward_nodes_explored.end(), 0UL) / backward_nodes_explored.size();
+  
+  std::cout << "Results Summary:" << std::endl;
+  std::cout << "  Paths found: " << stats.paths_found << "/" << stats.total_queries << std::endl;
+  std::cout << "  Average query time: " << stats.avg_query_time_ms << "ms" << std::endl;
+  std::cout << "  Average nodes explored: Fwd=" << stats.avg_nodes_explored_forward 
+            << ", Bwd=" << stats.avg_nodes_explored_backward << std::endl;
+  std::cout << std::endl;
+  
+  return stats;
+}
+
+TEST(ch_turn_restriction_analysis, compare_simple_vs_car_profiles) {
+  load_monaco_data();
+  
+  auto w = ways{"test/monaco", cista::mmap::protection::READ};
+  
+  // Generate random query pairs
+  std::vector<std::pair<node_idx_t, node_idx_t>> query_pairs;
+  std::mt19937 rng(42);  // Fixed seed for reproducible results
+  std::uniform_int_distribution<std::uint32_t> node_dist(0, w.n_nodes() - 1);
+  
+  for (int i = 0; i < 20; ++i) {
+    auto source = node_idx_t{node_dist(rng)};
+    auto target = node_idx_t{node_dist(rng)};
+    if (source != target) {
+      query_pairs.emplace_back(source, target);
+    }
+  }
+  
+  std::cout << "CH Turn Restriction Analysis" << std::endl;
+  std::cout << "Graph: " << w.n_nodes() << " nodes" << std::endl;
+  std::cout << "Testing with " << query_pairs.size() << " query pairs" << std::endl;
+  std::cout << std::endl;
+  
+  // Test simple profile (no turn restrictions)
+  auto simple_stats = measure_ch_performance<simple>(w, "Simple (No Turn Restrictions)", query_pairs);
+  
+  // Test car profile (with turn restrictions)  
+  auto car_stats = measure_ch_performance<car>(w, "Car (With Turn Restrictions)", query_pairs);
+  
+  // Analysis and comparison
+  std::cout << "=== COMPARATIVE ANALYSIS ===" << std::endl;
+  std::cout << std::endl;
+  
+  std::cout << "Preprocessing Comparison:" << std::endl;
+  std::cout << "  Simple: " << simple_stats.shortcuts_created << " shortcuts, " 
+            << simple_stats.preprocessing_time_ms << "ms" << std::endl;
+  std::cout << "  Car: " << car_stats.shortcuts_created << " shortcuts, " 
+            << car_stats.preprocessing_time_ms << "ms" << std::endl;
+  std::cout << std::endl;
+  
+  std::cout << "Query Performance Comparison:" << std::endl;
+  std::cout << "  Simple Profile:" << std::endl;
+  std::cout << "    Average query time: " << simple_stats.avg_query_time_ms << "ms" << std::endl;
+  std::cout << "    Average nodes explored: " 
+            << (simple_stats.avg_nodes_explored_forward + simple_stats.avg_nodes_explored_backward) << std::endl;
+  std::cout << "    Success rate: " << (simple_stats.paths_found * 100.0 / simple_stats.total_queries) << "%" << std::endl;
+  
+  std::cout << "  Car Profile:" << std::endl;
+  std::cout << "    Average query time: " << car_stats.avg_query_time_ms << "ms" << std::endl;
+  std::cout << "    Average nodes explored: " 
+            << (car_stats.avg_nodes_explored_forward + car_stats.avg_nodes_explored_backward) << std::endl;
+  std::cout << "    Success rate: " << (car_stats.paths_found * 100.0 / car_stats.total_queries) << "%" << std::endl;
+  std::cout << std::endl;
+  
+  // Calculate performance ratios
+  double query_time_ratio = car_stats.avg_query_time_ms / simple_stats.avg_query_time_ms;
+  double nodes_explored_ratio = 
+      double(car_stats.avg_nodes_explored_forward + car_stats.avg_nodes_explored_backward) /
+      double(simple_stats.avg_nodes_explored_forward + simple_stats.avg_nodes_explored_backward);
+  
+  std::cout << "Performance Impact of Turn Restrictions:" << std::endl;
+  std::cout << "  Query time ratio (Car/Simple): " << query_time_ratio << "x" << std::endl;
+  std::cout << "  Nodes explored ratio (Car/Simple): " << nodes_explored_ratio << "x" << std::endl;
+  std::cout << std::endl;
+  
+  if (nodes_explored_ratio > 2.0) {
+    std::cout << "ANALYSIS: Turn restrictions significantly increase search space!" << std::endl;
+    std::cout << "This suggests that CH shortcuts are less effective with turn restrictions." << std::endl;
+  } else if (simple_stats.avg_nodes_explored_forward + simple_stats.avg_nodes_explored_backward < 100) {
+    std::cout << "ANALYSIS: Simple profile shows efficient CH behavior (< 100 nodes explored)." << std::endl;
+    std::cout << "This suggests CH algorithm is working correctly on simple graphs." << std::endl;
+  } else {
+    std::cout << "ANALYSIS: Both profiles show large search spaces." << std::endl;
+    std::cout << "This might indicate other issues beyond turn restrictions." << std::endl;
+  }
+  
+  std::cout << std::endl;
+  
+  // The test always passes - it's for analysis, not validation
+  EXPECT_TRUE(true) << "Turn restriction analysis completed";
+}

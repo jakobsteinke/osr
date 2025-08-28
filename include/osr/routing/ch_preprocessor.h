@@ -31,10 +31,10 @@ public:
     shortcuts_.clear();
     
     std::cout << "Starting CH preprocessing for " << w_.n_nodes() << " nodes...\n";
-    std::cout << "Using random ordering with Python-inspired shortcut creation\n";
+    std::cout << "Using RoutingKit-exact implementation\n";
     
-    // Use random ordering as requested, but with improved shortcut logic from Python
-    preprocess_hybrid_approach();
+    // Use RoutingKit's exact approach: process nodes in contraction order
+    preprocess_routingkit_style();
     
     std::cout << "CH preprocessing complete\n";
   }
@@ -243,21 +243,15 @@ private:
         
         auto const via_cost = cost_v_u + cost_u_w;
         
-        // RoutingKit-style direction-specific shortcut creation
-        // Add shortcut to forward graph if it's an upward edge (from lower to higher level)
-        // Add shortcut to backward graph if it's a downward edge (from higher to lower level)
+        // RoutingKit-exact approach: Add shortcuts to BOTH graphs during contraction
+        // RoutingKit processes nodes in contraction order and adds ALL edges to appropriate graphs
+        // The level filtering is implicit through the contraction order processing
         
-        if (levels_.is_higher_level(w, v)) {
-          // w has higher level than v -> upward edge for forward search
-          shortcuts_.add_forward_shortcut(v, w, u, via_cost);
-        } else if (levels_.is_higher_level(v, w)) {
-          // v has higher level than w -> downward edge for backward search
-          shortcuts_.add_backward_shortcut(v, w, u, via_cost);
-        } else {
-          // Same level - add to both for safety (shouldn't happen with proper ordering)
-          shortcuts_.add_forward_shortcut(v, w, u, via_cost);
-          shortcuts_.add_backward_shortcut(v, w, u, via_cost);
-        }
+        // Add to forward graph (v -> w, outgoing from perspective of remaining graph)
+        shortcuts_.add_forward_shortcut(v, w, u, via_cost);
+        
+        // Add to backward graph (w -> v, incoming from perspective of remaining graph)  
+        shortcuts_.add_backward_shortcut(w, v, u, via_cost);
         
         shortcuts_created++;
       }
@@ -631,12 +625,14 @@ private:
     return get_edge_cost(from, to) != kInfeasible;
   }
   
-  // Hybrid preprocessing: Random ordering + Python-inspired shortcut creation
-  void preprocess_hybrid_approach() {
-    // Contract nodes in random level order (as originally requested)
+  // RoutingKit-exact preprocessing: Process nodes in strict contraction order
+  void preprocess_routingkit_style() {
+    // Process nodes in contraction order (level 1 to n) exactly like RoutingKit
     auto contracted_count = 0U;
     std::size_t shortcut_count = 0U;
     auto const report_interval = std::max(w_.n_nodes() / 20, node_idx_t::value_t{100});
+    
+    std::cout << "RoutingKit-style preprocessing: contracting " << levels_.size() << " nodes in order\n";
     
     for (ch_levels::level_t level = 1; level <= levels_.size(); ++level) {
       auto const node = find_node_with_level(level);

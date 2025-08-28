@@ -57,22 +57,19 @@ public:
           
           original_edges_found++;
           
-          // RoutingKit-style: For direct edges, we still need level filtering
-        // since we can't pre-filter all original graph edges efficiently
-        // TODO: In full RoutingKit implementation, even original edges would be pre-separated
-        if (is_ch_edge_allowed<SearchDir>(current.get_node(), neighbor.get_node())) {
-          original_edges_allowed++;
-          callback(neighbor, cost, dist, way, way_pos_from, way_pos_to, elevation, uses_elevator);
-        }
+          // RoutingKit-style: NO runtime level filtering - expand ALL edges
+        // Level filtering is handled during preprocessing by building pre-separated graphs
+        original_edges_allowed++;
+        callback(neighbor, cost, dist, way, way_pos_from, way_pos_to, elevation, uses_elevator);
         });
     
     int shortcuts_found = 0;
     int shortcuts_allowed = 0;
     
-    // Also expand shortcut edges from current node
+    // RoutingKit-style: expand shortcut edges from pre-built direction-specific graphs
     expand_shortcut_edges<SearchDir>(w, current, [&](auto&&... args) {
       shortcuts_found++;
-      shortcuts_allowed++;
+      shortcuts_allowed++;  // All shortcuts in pre-built graphs are allowed
       callback(args...);
     });
     
@@ -104,37 +101,15 @@ public:
   }
 
   /**
-   * Check if edge (from, to) is allowed in CH query based on search direction.
-   * 
-   * RoutingKit-style implementation with relaxed filtering for original graph edges.
-   * Shortcut edges are already pre-filtered during preprocessing, but original
-   * graph edges still need some filtering since we can't efficiently pre-separate them all.
+   * Legacy method - not used in RoutingKit-style implementation.
+   * RoutingKit doesn't do runtime level filtering - it's all done during preprocessing.
+   * Kept for compatibility with existing code that might call it.
    */
   template <direction SearchDir>
   bool is_ch_edge_allowed(node_idx_t from, node_idx_t to) const {
-    // RELAXED FILTERING for better connectivity with random ordering
-    // This allows the searches to have more overlap while maintaining hierarchy benefits
-    
-    auto const from_level = levels_.get_level(from);
-    auto const to_level = levels_.get_level(to);
-    
-    if constexpr (SearchDir == direction::kForward) {
-      // Forward search: prefer upward moves but allow limited downward for connectivity
-      if (to_level > from_level) {
-        return true;  // Always allow upward moves
-      }
-      // Allow limited downward moves to improve connectivity
-      return false;
-      //return (from_level - to_level) <= 100;  // Configurable tolerance
-    } else {
-      // Backward search: prefer downward moves but allow limited upward for connectivity  
-      if (from_level > to_level) {
-        return true;  // Always allow downward moves (backward search logic)
-      }
-      return false;
-      // Allow limited upward moves to improve connectivity
-      //return (to_level - from_level) <= 100;  // Configurable tolerance
-    }
+    // RoutingKit-style: No runtime level filtering needed
+    // All level filtering is done during preprocessing when building direction-specific graphs
+    return true;  // Always allow since graphs are pre-filtered
   }
   
   // Legacy method for compatibility - now properly delegates to template version

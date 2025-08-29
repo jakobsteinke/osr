@@ -1,462 +1,224 @@
 #pragma once
 
+#include <vector>
 #include <algorithm>
-#include <iostream>
 
-#include "osr/elevation_storage.h"
-#include "osr/location.h"
-#include "osr/routing/ch_levels.h"
-#include "osr/routing/ch_search.h"
-#include "osr/routing/ch_shortcut.h"
-#include "osr/routing/profiles/car.h"
-#include "osr/routing/sharing_data.h"
+#include "osr/routing/ch_graph.h"
+#include "osr/routing/dial.h"
 #include "osr/types.h"
-#include "osr/ways.h"
 
 namespace osr {
 
-/**
- * Bidirectional CH Dijkstra search.
- * Runs forward and backward CH searches simultaneously with abort-on-success termination.
- * Both directions use upward edges (level filtering) as per CH theory.
- */
-template <typename Profile>
+struct ch_query_result {
+  cost_t distance = kInfeasible;
+  std::vector<std::uint32_t> path;
+};
+
+struct ch_query_label {
+  node_idx_t node;
+  cost_t cost;
+  
+  explicit ch_query_label(node_idx_t n = node_idx_t::invalid(), cost_t c = kInfeasible) 
+    : node(n), cost(c) {}
+};
+
+struct ch_get_bucket {
+  cost_t operator()(const ch_query_label& l) const { return l.cost; }
+};
+
 class ch_bidirectional {
 public:
-  using profile_t = Profile;
-  using key = typename Profile::key;
-  using label = typename Profile::label;
-  using node = typename Profile::node;
-  using entry = typename Profile::entry;
-  using hash = typename Profile::hash;
+  explicit ch_bidirectional(const ch_graph& graph)
+    : graph_(graph),
+      node_count_(graph.node_count()),
+      forward_distance_(node_count_, kInfeasible),
+      backward_distance_(node_count_, kInfeasible),
+      forward_predecessor_(node_count_, node_idx_t::invalid()),
+      backward_predecessor_(node_count_, node_idx_t::invalid()),
+      forward_queue_(ch_get_bucket{}),
+      backward_queue_(ch_get_bucket{}) {}
 
-  explicit ch_bidirectional(ch_levels const& levels, ch_shortcuts const& shortcuts)
-      : levels_(levels), shortcuts_(shortcuts), 
-        forward_search_(levels, shortcuts), 
-        backward_search_(levels, shortcuts) {}
-
-  /**
-   * Initialize bidirectional search.
-   */
-  void init(cost_t const max_cost, location const& start_loc, location const& end_loc) {
-    forward_search_.init(max_cost);
-    backward_search_.init(max_cost);
+  ch_query_result query(std::uint32_t source, std::uint32_t target, cost_t max_cost = kInfeasible) {
+    reset(max_cost);
     
-    start_loc_ = start_loc;
-    end_loc_ = end_loc;
-    
-    // Reset meeting point state
-    clear_meeting_point();
-    search_finished_ = false;
-  }
-
-  /**
-   * Add starting nodes to forward search.
-   */
-  void add_forward_start(node const& start_node, cost_t const initial_cost = cost_t{0}) {
-    forward_search_.add_start(start_node, initial_cost);
-    std::cout << "Forward start node: " << start_node.get_node().v_ 
-              << " level: " << levels_.get_level(start_node.get_node()) << "\n";
-  }
-
-  /**
-   * Add starting nodes to backward search.
-   */
-  void add_backward_start(node const& end_node, cost_t const initial_cost = cost_t{0}) {
-    backward_search_.add_start(end_node, initial_cost);
-    std::cout << "Backward start node: " << end_node.get_node().v_ 
-              << " level: " << levels_.get_level(end_node.get_node()) << "\n";
-  }
-
-  /**
-   * Run complete bidirectional search until termination.
-   */
-  template <bool WithBlocked = false>
-  bool run_search(ways const& w,
-                  cost_t const max_cost,
-                  bitvec<node_idx_t> const* blocked = nullptr,
-                  sharing_data const* sharing = nullptr,
-                  elevation_storage const* elevations = nullptr) {
-    
-    while (!should_terminate()) {
-      bool expanded_any = false;
-
-      // Alternate between forward and backward expansion
-      if (forward_search_.has_next()) {
-        auto const expanded = forward_search_.expand_step<direction::kForward, WithBlocked>(
-            w, max_cost, blocked, sharing, elevations);
-        
-        if (expanded != node::invalid()) {
-          expanded_any = true;
-          check_meeting_point(expanded, direction::kForward);
-        }
-      }
-
-      if (backward_search_.has_next() && !should_terminate()) {
-        auto const expanded = backward_search_.expand_step<direction::kBackward, WithBlocked>(
-            w, max_cost, blocked, sharing, elevations);
-        
-        if (expanded != node::invalid()) {
-          expanded_any = true;
-          check_meeting_point(expanded, direction::kBackward);
-        }
-      }
-
-      if (!expanded_any) {
-        break; // Both searches exhausted
-      }
+    if (source >= node_count_ || target >= node_count_) {
+      return {};
     }
-
-    search_finished_ = true;
     
-    // With Python-style termination (run to completion), the existing meeting point detection
-    // during search will naturally find the optimal meeting point among all reachable nodes.
+    if (source == target) {
+      return {0, {source}};
+    }
     
-    // Show search summary
-    auto const fwd_explored = forward_search_.get_distances().size();
-    auto const bwd_explored = backward_search_.get_distances().size();
-    bool const found_path = tentative_shortest_path_ != kInfeasible;
+    // Initialize search with dial queues
+    forward_distance_[source] = 0;
+    backward_distance_[target] = 0;
     
-    // Debug: Show explored node sets to check for overlap
-    ankerl::unordered_dense::set<node_idx_t> fwd_nodes, bwd_nodes;
-    int overlaps = 0;
+    forward_queue_.push(ch_query_label{node_idx_t{source}, 0});
+    backward_queue_.push(ch_query_label{node_idx_t{target}, 0});
     
-    for (auto const& [key, entry] : forward_search_.get_distances()) {
-      node_idx_t node_idx;
-      if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
-        node_idx = key;
-      } else if constexpr (requires { key.n_; }) {
-        node_idx = key.n_;
-      } else if constexpr (requires { key.get_node(); }) {
-        node_idx = key.get_node();
+    cost_t shortest_path_length = kInfeasible;
+    std::uint32_t meeting_node = std::numeric_limits<std::uint32_t>::max();
+    
+    bool forward_turn = true;
+    
+    // Main bidirectional search loop using dial queues
+    while (!forward_queue_.empty() || !backward_queue_.empty()) {
+      bool forward_finished = forward_queue_.empty() || 
+                             (!forward_queue_.empty() && forward_queue_.buckets_[forward_queue_.get_next_bucket()].back().cost >= shortest_path_length);
+      bool backward_finished = backward_queue_.empty() || 
+                              (!backward_queue_.empty() && backward_queue_.buckets_[backward_queue_.get_next_bucket()].back().cost >= shortest_path_length);
+      
+      if (forward_finished && backward_finished) {
+        break;
+      }
+      
+      if (forward_finished) forward_turn = false;
+      if (backward_finished) forward_turn = true;
+      
+      if (forward_turn) {
+        settle_forward_node(shortest_path_length, meeting_node);
+        forward_turn = false;
       } else {
-        continue;
+        settle_backward_node(shortest_path_length, meeting_node);
+        forward_turn = true;
       }
-      fwd_nodes.insert(node_idx);
     }
     
-    for (auto const& [key, entry] : backward_search_.get_distances()) {
-      node_idx_t node_idx;
-      if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
-        node_idx = key;
-      } else if constexpr (requires { key.n_; }) {
-        node_idx = key.n_;
-      } else if constexpr (requires { key.get_node(); }) {
-        node_idx = key.get_node();
-      } else {
-        continue;
-      }
-      if (fwd_nodes.count(node_idx)) {
-        overlaps++;
-      }
-      bwd_nodes.insert(node_idx);
+    if (meeting_node == std::numeric_limits<std::uint32_t>::max()) {
+      return {};  // No path found
     }
     
-    std::cout << "SEARCH SUMMARY - Fwd: " << fwd_explored 
-              << " nodes, Bwd: " << bwd_explored << " nodes, "
-              << "Overlaps: " << overlaps << ", "
-              << (found_path ? "PATH FOUND" : "NO PATH") << "\n";
-    
-    // Show some explored nodes for debugging
-    if (fwd_explored <= 10 && bwd_explored <= 10) {
-      std::cout << "Fwd nodes: ";
-      int count = 0;
-      for (auto node : fwd_nodes) {
-        if (count++ < 5) std::cout << node.v_ << " ";
-      }
-      if (fwd_nodes.size() > 5) std::cout << "...";
-      std::cout << "\nBwd nodes: ";
-      count = 0;
-      for (auto node : bwd_nodes) {
-        if (count++ < 5) std::cout << node.v_ << " ";
-      }
-      if (bwd_nodes.size() > 5) std::cout << "...";
-      std::cout << "\n";
-    }
-    
-    // if (fwd_explored > 0 || bwd_explored > 0) {  // Show all searches
-    //   std::cout << "CH Search Debug - Fwd: " << fwd_explored 
-    //             << " nodes, Bwd: " << bwd_explored << " nodes, "
-    //             << "Path: " << (found_path ? "FOUND" : "NO_RESULT") 
-    //             << (found_path ? " cost=" + std::to_string(tentative_shortest_path_) : "") << "\n";
-    // }
-    
-    return found_path;
-  }
-
-  /**
-   * Get the shortest path cost found, or kInfeasible if no path exists.
-   */
-  cost_t get_shortest_path_cost() const {
-    return tentative_shortest_path_;
-  }
-
-  /**
-   * Get the meeting point nodes (forward and backward).
-   */
-  std::pair<node, node> get_meeting_point() const {
-    return {forward_meeting_node_, backward_meeting_node_};
-  }
-
-  /**
-   * Check if search has found a path.
-   */
-  bool has_path() const {
-    return tentative_shortest_path_ != kInfeasible;
-  }
-
-  /**
-   * Check if search is finished.
-   */
-  bool is_finished() const {
-    return search_finished_;
-  }
-
-  /**
-   * Get distances from forward search.
-   */
-  auto const& get_forward_distances() const {
-    return forward_search_.get_distances();
-  }
-
-  /**
-   * Get distances from backward search.
-   */
-  auto const& get_backward_distances() const {
-    return backward_search_.get_distances();
+    return {shortest_path_length, reconstruct_path(source, target, meeting_node)};
   }
 
 private:
-  /**
-   * Clear meeting point state.
-   */
-  void clear_meeting_point() {
-    forward_meeting_node_ = node::invalid();
-    backward_meeting_node_ = node::invalid();
-    tentative_shortest_path_ = kInfeasible;
-  }
-
-  /**
-   * Check if a newly expanded node creates a meeting point.
-   * Uses car::node granularity to respect turn restrictions and U-turn penalties.
-   */
-  void check_meeting_point(node const& expanded_node, direction const search_dir) {
-    // Validate inputs
-    if (expanded_node == node::invalid()) {
-      return; // Invalid node - skip
-    }
+  void reset(cost_t max_cost = kInfeasible) {
+    std::fill(forward_distance_.begin(), forward_distance_.end(), kInfeasible);
+    std::fill(backward_distance_.begin(), backward_distance_.end(), kInfeasible);
+    std::fill(forward_predecessor_.begin(), forward_predecessor_.end(), node_idx_t::invalid());
+    std::fill(backward_predecessor_.begin(), backward_predecessor_.end(), node_idx_t::invalid());
     
-    // Get cost from the search that just expanded this node
-    auto const expanded_cost = (search_dir == direction::kForward) 
-        ? forward_search_.get_cost(expanded_node)
-        : backward_search_.get_cost(expanded_node);
-
-    // Skip if we don't have a valid cost for the expanded node
-    if (expanded_cost == kInfeasible) {
-      return;
-    }
-
-    // Check if the other search has also reached this exact car::node
-    auto const other_cost = (search_dir == direction::kForward)
-        ? backward_search_.get_cost(expanded_node)
-        : forward_search_.get_cost(expanded_node);
-    
-    // Debug output for meeting point checks (can be enabled for debugging)
-    // std::cout << "Meeting check: node " << expanded_node.get_node().v_ 
-    //           << " dir=" << (search_dir == direction::kForward ? "F" : "B")
-    //           << " expanded_cost=" << expanded_cost 
-    //           << " other_cost=" << (other_cost == kInfeasible ? -1 : other_cost) << "\n";
-
-    if (other_cost != kInfeasible) {
-      // Both searches have reached this exact car::node - direct meeting point
-      auto const forward_cost = (search_dir == direction::kForward) ? expanded_cost : other_cost;
-      auto const backward_cost = (search_dir == direction::kForward) ? other_cost : expanded_cost;
-      
-      // std::cout << "MEETING POINT FOUND at node " << expanded_node.get_node().v_ 
-      //           << " fwd_cost=" << forward_cost << " bwd_cost=" << backward_cost << "\n";
-      evaluate_direct_meetpoint(expanded_node, forward_cost, backward_cost, search_dir);
-    }
-    
-    // Also check for end-of-way meeting points (like in bidirectional A*)
-    // This handles cases where searches meet on the same node_idx_t but different car::node
-    check_end_of_way_meetpoint(expanded_node, expanded_cost, search_dir);
-  }
-
-private:
-  /**
-   * Evaluate a direct meeting point where both searches reached the same car::node.
-   */
-  void evaluate_direct_meetpoint(node const& meeting_node, 
-                                 cost_t const forward_cost, cost_t const backward_cost,
-                                 direction const search_dir) {
-    auto const total_cost = forward_cost + backward_cost;
-    
-    // std::cout << "Evaluating meeting point: total_cost=" << total_cost 
-    //           << " current_best=" << tentative_shortest_path_ << "\n";
-    
-    if (total_cost < tentative_shortest_path_) {
-      tentative_shortest_path_ = total_cost;
-      forward_meeting_node_ = meeting_node;
-      backward_meeting_node_ = meeting_node;
-      
-      // std::cout << "NEW BEST PATH found via node " << meeting_node.get_node().v_ 
-      //           << " cost=" << total_cost << "\n";
+    // Reset dial queues with appropriate bucket count
+    forward_queue_.clear();
+    backward_queue_.clear();
+    if (max_cost != kInfeasible && max_cost > 0) {
+      forward_queue_.n_buckets(max_cost + 1U);
+      backward_queue_.n_buckets(max_cost + 1U);
+    } else {
+      // Default reasonable bucket count for unknown max cost
+      forward_queue_.n_buckets(10000U);
+      backward_queue_.n_buckets(10000U);  
     }
   }
 
-  /**
-   * Check for end-of-way meeting points where searches meet on same node_idx_t 
-   * but potentially different car::node instances.
-   */
-  void check_end_of_way_meetpoint(node const& expanded_node, cost_t const expanded_cost,
-                                  direction const search_dir) {
-    // Get the opposite search's distances
-    auto const& opposite_distances = (search_dir == direction::kForward)
-        ? backward_search_.get_distances()
-        : forward_search_.get_distances();
-        
-    // Debug: End-of-way check (can be enabled for debugging)
-    // if (opposite_distances.size() > 0) {
-    //   std::cout << "End-of-way check: node " << expanded_node.get_node().v_ 
-    //             << " vs " << opposite_distances.size() << " opposite nodes\n";
-    // }
-
-    // Look for any car::node on the same node_idx_t that the opposite search reached
-    auto const target_node_idx = expanded_node.get_node();
+  void settle_forward_node(cost_t& shortest_path_length, std::uint32_t& meeting_node) {
+    if (forward_queue_.empty()) return;
     
-    for (auto const& [key, entry] : opposite_distances) {
-      // Check if this entry corresponds to the same node_idx_t
-      // Handle different key types across profiles
-      node_idx_t key_node_idx;
-      
-      if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
-        // Key is directly node_idx_t (car, car_parking, bike)
-        key_node_idx = key;
-      } else if constexpr (requires { key.n_; }) {
-        // Key has .n_ member (car_sharing) 
-        key_node_idx = key.n_;
-      } else if constexpr (requires { key.get_node(); }) {
-        // Key is a node with get_node() method (foot)
-        key_node_idx = key.get_node();
-      } else {
-        continue; // Skip unknown key types
+    auto current = forward_queue_.pop();
+    auto const node = current.node.v_;
+    auto const distance = current.cost;
+    
+    if (distance > forward_distance_[node]) return;  // Outdated entry
+    
+    // Check for meeting with backward search
+    if (backward_distance_[node] != kInfeasible) {
+      auto const total_distance = distance + backward_distance_[node];
+      if (total_distance < shortest_path_length) {
+        shortest_path_length = total_distance;
+        meeting_node = node;
       }
+    }
+    
+    // Expand upward edges only (level filtering)
+    for (auto const& arc : graph_.out_arcs(node)) {
+      auto const neighbor = arc.target.v_;
       
-      if (key_node_idx == target_node_idx) {
-        // Found a potential meeting point on the same node_idx_t
-        // Try to get cost for any car::node on this node_idx_t
-        auto other_cost = kInfeasible;
-        node other_meeting_node = node::invalid();
-        
-        // Check if the entry is compatible with our expanded node
-        other_cost = entry.cost(expanded_node);
-        
-        if (other_cost == kInfeasible) {
-          // The expanded_node car::node doesn't match the entry - try to find a compatible one
-          if constexpr (std::is_same_v<typename Profile::key, node_idx_t>) {
-            // std::cout << "Entry scan for node " << key_node_idx.v_ 
-            //           << " (expanded from dir " << (search_dir == direction::kForward ? "F" : "B") << ")\n";
-            
-            // For car profile, try to find any car::node on this node_idx_t that has a valid cost
-            // We'll iterate through the entry to find the minimum valid cost
-            auto min_cost = kInfeasible;
-            int valid_costs = 0;
-            for (auto const& cost_val : entry.cost_) {
-              if (cost_val < min_cost) {
-                min_cost = cost_val;
-              }
-              if (cost_val != kInfeasible) {
-                valid_costs++;
-              }
-            }
-            
-            // std::cout << "  Entry has " << valid_costs << " valid costs, min=" << min_cost << "\n";
-            
-            if (min_cost != kInfeasible) {
-              other_cost = min_cost;
-              // Create a basic node for this node_idx_t - use expanded_node as template but with different node_idx_t
-              other_meeting_node = expanded_node;  // Copy structure
-              other_meeting_node.n_ = key;         // Replace node_idx_t
-              
-              // std::cout << "Found compatible meeting via entry scan: node " << key_node_idx.v_ 
-              //           << " cost=" << other_cost << "\n";
-            } else {
-              // std::cout << "  No valid costs in entry, skipping\n";
-              continue; // No valid cost found in this entry
-            }
-          } else {
-            // For other profiles, skip this optimization for now
-            continue;
-          }
-        } else {
-          other_meeting_node = expanded_node;
-        }
-        
-        if (other_cost != kInfeasible) {
-          auto const total_cost = expanded_cost + other_cost;
-          
-          // std::cout << "End-of-way meeting candidate: node " << key_node_idx.v_ 
-          //           << " total_cost=" << total_cost << " current_best=" << tentative_shortest_path_ << "\n";
-          
-          if (total_cost < tentative_shortest_path_) {
-            tentative_shortest_path_ = total_cost;
-            
-            if (search_dir == direction::kForward) {
-              forward_meeting_node_ = expanded_node;
-              backward_meeting_node_ = other_meeting_node;
-            } else {
-              forward_meeting_node_ = other_meeting_node;
-              backward_meeting_node_ = expanded_node;
-            }
-            
-            // std::cout << "NEW BEST END-OF-WAY PATH found at node " << key_node_idx.v_ 
-            //           << " cost=" << total_cost << "\n";
-          }
-        }
+      // Level filtering: only go to higher levels
+      if (graph_.level(neighbor) <= graph_.level(node)) continue;
+      
+      auto const new_distance = distance + arc.weight;
+      if (new_distance < forward_distance_[neighbor] && new_distance < kInfeasible) {
+        forward_distance_[neighbor] = new_distance;
+        forward_predecessor_[neighbor] = node_idx_t{node};
+        forward_queue_.push(ch_query_label{node_idx_t{neighbor}, static_cast<cost_t>(new_distance)});
       }
     }
   }
 
-  /**
-   * Check if search should terminate using Python-style logic.
-   * Runs both searches to completion, then finds optimal meeting point.
-   */
-  bool should_terminate() const {
-    // PYTHON-STYLE TERMINATION: Run both searches to completion
-    // This matches Python's approach where both searches run until queues are empty,
-    // then the optimal meeting point is found among ALL reachable nodes.
-    //
-    // Python logic (lines 251-282):
-    // while pq_start or pq_end:
-    //   # Run both searches to completion
-    //
-    // This is critical for strict level filtering to work correctly!
+  void settle_backward_node(cost_t& shortest_path_length, std::uint32_t& meeting_node) {
+    if (backward_queue_.empty()) return;
     
-    auto const forward_finished = !forward_search_.has_next();
-    auto const backward_finished = !backward_search_.has_next();
+    auto current = backward_queue_.pop();
+    auto const node = current.node.v_;
+    auto const distance = current.cost;
     
-    // Only terminate when BOTH searches are completely exhausted
-    return forward_finished && backward_finished;
+    if (distance > backward_distance_[node]) return;  // Outdated entry
+    
+    // Check for meeting with forward search
+    if (forward_distance_[node] != kInfeasible) {
+      auto const total_distance = forward_distance_[node] + distance;
+      if (total_distance < shortest_path_length) {
+        shortest_path_length = total_distance;
+        meeting_node = node;
+      }
+    }
+    
+    // Expand upward edges only (level filtering) on reversed graph
+    for (auto const& arc : graph_.in_arcs(node)) {
+      auto const neighbor = arc.target.v_;
+      
+      // Level filtering: only go to higher levels (on reversed graph)
+      if (graph_.level(neighbor) <= graph_.level(node)) continue;
+      
+      auto const new_distance = distance + arc.weight;
+      if (new_distance < backward_distance_[neighbor] && new_distance < kInfeasible) {
+        backward_distance_[neighbor] = new_distance;
+        backward_predecessor_[neighbor] = node_idx_t{node};
+        backward_queue_.push(ch_query_label{node_idx_t{neighbor}, static_cast<cost_t>(new_distance)});
+      }
+    }
   }
 
-private:
-  ch_levels const& levels_;
-  ch_shortcuts const& shortcuts_;
+  std::vector<std::uint32_t> reconstruct_path(std::uint32_t source, std::uint32_t target, std::uint32_t meeting_node) {
+    std::vector<std::uint32_t> path;
+    
+    // Build path from source to meeting node
+    std::vector<std::uint32_t> forward_path;
+    auto current = meeting_node;
+    while (current != source) {
+      forward_path.push_back(current);
+      current = forward_predecessor_[current].v_;
+      if (current == node_idx_t::invalid().v_) break;
+    }
+    forward_path.push_back(source);
+    std::reverse(forward_path.begin(), forward_path.end());
+    
+    // Build path from meeting node to target
+    std::vector<std::uint32_t> backward_path;
+    current = meeting_node;
+    while (current != target) {
+      current = backward_predecessor_[current].v_;
+      if (current == node_idx_t::invalid().v_) break;
+      backward_path.push_back(current);
+    }
+    
+    // Combine paths
+    path = forward_path;
+    path.insert(path.end(), backward_path.begin(), backward_path.end());
+    
+    return path;
+  }
 
-  // Individual search instances
-  ch_search<Profile> forward_search_;
-  ch_search<Profile> backward_search_;
-
-  // Search state
-  location start_loc_;
-  location end_loc_;
-
-  // Meeting point tracking
-  node forward_meeting_node_{node::invalid()};
-  node backward_meeting_node_{node::invalid()};
-  cost_t tentative_shortest_path_{kInfeasible};
-
-  bool search_finished_{false};
+  const ch_graph& graph_;
+  std::uint32_t node_count_;
+  
+  std::vector<cost_t> forward_distance_;
+  std::vector<cost_t> backward_distance_;
+  std::vector<node_idx_t> forward_predecessor_;
+  std::vector<node_idx_t> backward_predecessor_;
+  
+  dial<ch_query_label, ch_get_bucket> forward_queue_;
+  dial<ch_query_label, ch_get_bucket> backward_queue_;
 };
 
 }  // namespace osr

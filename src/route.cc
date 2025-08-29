@@ -16,11 +16,12 @@
 #include "osr/elevation_storage.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
-#include "osr/routing/ch_bidirectional.h"
-#include "osr/routing/ch_levels.h"
-#include "osr/routing/ch_shortcut.h"
-#include "osr/routing/ch_path_reconstruction.h"
-#include "osr/routing/ch_preprocessor.h"
+// Commented out broken OSR CH files
+// #include "osr/routing/ch_bidirectional.h"
+// #include "osr/routing/ch_levels.h"
+// #include "osr/routing/ch_shortcut.h"
+// #include "osr/routing/ch_path_reconstruction.h"
+// #include "osr/routing/ch_preprocessor.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profiles/bike.h"
 #include "osr/routing/profiles/bike_sharing.h"
@@ -56,6 +57,7 @@ dijkstra<Profile>& get_dijkstra() {
   return *s.get();
 }
 
+/*
 template <typename Profile>
 class ch_search_manager {
 public:
@@ -143,6 +145,7 @@ ch_search_manager<Profile>& get_ch() {
   }
   return *s.get();
 }
+*/
 
 struct connecting_way {
   constexpr bool valid() const { return way_ != way_idx_t::invalid(); }
@@ -761,6 +764,7 @@ std::optional<path> route_dijkstra(ways const& w,
   return std::nullopt;
 }
 
+/*
 template <typename Profile>
 std::optional<path> route_ch(ways const& w,
                              lookup const& l,
@@ -869,6 +873,7 @@ std::optional<path> route_ch(ways const& w,
                         sharing, elevations);
       });
 }
+*/
 
 template <typename Profile>
 std::vector<std::optional<path>> route(
@@ -1097,11 +1102,15 @@ std::optional<path> route(ways const& w,
                                    sharing, elevations);
       });
     case routing_algorithm::kCH:
+      // Commented out broken CH implementation
+      throw utl::fail("CH routing not available");
+      /*
       return with_profile(profile, [&]<typename Profile>(Profile&&) {
         return route_ch(w, l, get_ch<Profile>(), from, to,
                         from_match, to_match, max, dir, blocked, sharing,
                         elevations);
       });
+      */
   }
   throw utl::fail("not implemented");
 }
@@ -1133,8 +1142,12 @@ std::optional<path> route(ways const& w,
                                  max_match_distance, blocked, sharing,
                                  elevations);
     case routing_algorithm::kCH:
+      // Commented out broken CH implementation
+      throw utl::fail("CH routing not available");
+      /*
       return route_ch(w, l, profile, from, to, max, dir,
                       max_match_distance, blocked, sharing, elevations);
+      */
   }
   throw utl::fail("not implemented");
 }

@@ -392,8 +392,10 @@ private:
       if (d > B) break;  // CH early stop
 
       if (target_keys.contains(cur.get_key())) {
-        auto& ref = distances_by_key_[cur.get_key()];
-        if (ref == 0 || d < ref) ref = d;
+        auto it = distances_by_key_.find(cur.get_key());
+        if (it == end(distances_by_key_) || d < it->second) {
+          distances_by_key_[cur.get_key()] = d;
+        }
         if (++settled_targets == target_keys.size()) break;
       }
 
@@ -405,6 +407,13 @@ private:
           auto nl = get_node_level(nxt.n_);
           if (nxt.n_ == forbidden_u || nl <= forb_level) return;
           cost_t nd = d + c;
+          
+          // Strict-improvement check before update
+          if (auto it = cost_.find(nxt.get_key()); it != end(cost_)) {
+            auto cur_best = it->second.cost(nxt);
+            if (cur_best != kInfeasible && nd >= cur_best) return; // no improvement
+          }
+          
           auto next = label{nxt, nd};
           if (nd <= B && cost_[nxt.get_key()].update(next, nxt, nd, cur)) {
             pq_.push(std::move(next));
@@ -421,6 +430,13 @@ private:
           if (nd > B) continue;
           Profile::resolve_all(*r_, sh.to_, level_t{static_cast<std::uint8_t>(0)}, [&](node const& nxt) {
             if (nxt.n_ != sh.to_) return;
+            
+            // Strict-improvement check before update
+            if (auto it = cost_.find(nxt.get_key()); it != end(cost_)) {
+              auto cur_best = it->second.cost(nxt);
+              if (cur_best != kInfeasible && nd >= cur_best) return; // no improvement
+            }
+            
             auto next = label{nxt, nd};
             if (cost_[nxt.get_key()].update(next, nxt, nd, cur)) {
               pq_.push(std::move(next));

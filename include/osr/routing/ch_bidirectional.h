@@ -392,76 +392,20 @@ struct ch_bidirectional {
         });
 
     // Robust meetpoint detection with slot-agnostic search
+    // Robust meetpoint detection on the current node (same base key only)
     auto const handle_end_of_way_meetpoint = [&]() {
       auto const opposite_cost_map =
           opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
 
-      // Find cheapest opposite-side label on the same node key (any slot)
+      // Cheapest opposite-side label on the same node key (any slot)
       auto [other_cost, other_node] = best_cost_on_same_key(*opposite_cost_map, r, curr);
       if (other_cost != kInfeasible) {
-        // Ensure meet_point_1_ is the FORWARD-side node, meet_point_2_ is BACKWARD-side
         if constexpr (SearchDir == direction::kForward) {
           evaluate_meetpoint(curr_cost, other_cost, curr, other_node);
         } else {
           evaluate_meetpoint(other_cost, curr_cost, other_node, curr);
         }
-        return; // done
       }
-
-      // Fallback: edge-crossing meetpoint detection (key-agnostic).
-      // Idea: look at neighbors reachable from `curr` in the *opposite* search
-      // direction. If the other search has a cost to any such neighbor,
-      // we can meet "on the edge" between `curr` and that neighbor.
-      ch_adjacent<opposite(SearchDir), WithBlocked>(
-          w, r, curr, blocked, sharing, elevations, /*relax_levels=*/true,
-          [&](node const neighbor, std::uint32_t const, distance_t,
-              way_idx_t const, std::uint16_t, std::uint16_t,
-              elevation_storage::elevation const, bool const) {
-            // Does the opposite side know about this neighbor (in *any* slot)?
-            auto [other_cost, other_node] =
-                best_cost_on_same_key(*opposite_cost_map, r, neighbor);
-            if (other_cost == kInfeasible) {
-              return;
-            }
-
-            // Two ways to "meet" across the edge:
-            //  A) current side at `curr`  + opposite side at `neighbor`
-            //  B) current side at `pred`  + opposite side at pred(neighbor)
-            // We'll try both if available and take the better.
-            cost_t a1 = curr_cost;
-            cost_t a2 = other_cost;
-            auto acceptA = [&] {
-              if constexpr (SearchDir == direction::kForward) {
-                evaluate_meetpoint(a1, a2, curr, other_node);
-              } else {
-                evaluate_meetpoint(a1, a2, other_node, curr);
-              }
-            };
-            acceptA();
-
-            // Try the "pred ↔ pred" variant if both predecessors exist.
-            auto const pred_it = costs.find(curr.get_key());
-            if (pred_it != end(costs)) {
-              auto const pred = pred_it->second.pred(curr);
-              if (pred.has_value()) {
-                auto const opp_it = opposite_cost_map->find(other_node.get_key());
-                if (opp_it != end(*opposite_cost_map)) {
-                  auto const opp_pred = opp_it->second.pred(other_node);
-                  if (opp_pred.has_value()) {
-                    auto const p_cost = get_cost<SearchDir>(*pred);
-                    auto const op_cost = opp_it->second.cost(other_node);
-                    if (p_cost != kInfeasible && op_cost != kInfeasible) {
-                      if constexpr (SearchDir == direction::kForward) {
-                        evaluate_meetpoint(p_cost, op_cost, *pred, other_node);
-                      } else {
-                        evaluate_meetpoint(p_cost, op_cost, other_node, *pred);
-                      }
-                    }
-                  }
-                }
-              }
-            }
-          });
     };
 
     handle_end_of_way_meetpoint();

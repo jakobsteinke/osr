@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <iostream>
 #include <optional>
+#include <atomic>
+#include <mutex>
 
 #include "boost/thread/tss.hpp"
 
@@ -16,12 +18,8 @@
 #include "osr/elevation_storage.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
-// Commented out broken OSR CH files
-// #include "osr/routing/ch_bidirectional.h"
-// #include "osr/routing/ch_levels.h"
-// #include "osr/routing/ch_shortcut.h"
-// #include "osr/routing/ch_path_reconstruction.h"
-// #include "osr/routing/ch_preprocessor.h"
+#include "osr/routing/ch_bidirectional.h"
+#include "osr/routing/ch_preprocessor.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profiles/bike.h"
 #include "osr/routing/profiles/bike_sharing.h"
@@ -31,6 +29,8 @@
 #include "osr/routing/profiles/foot.h"
 #include "osr/routing/sharing_data.h"
 #include "osr/routing/with_profile.h"
+
+#include "fmt/core.h"
 #include "osr/util/infinite.h"
 #include "osr/util/reverse.h"
 
@@ -55,6 +55,22 @@ dijkstra<Profile>& get_dijkstra() {
     s.reset(new dijkstra<Profile>{});
   }
   return *s.get();
+}
+
+template <typename Profile>
+ch_bidirectional<Profile>& get_ch_bidirectional() {
+  static auto s = boost::thread_specific_ptr<ch_bidirectional<Profile>>{};
+  if (s.get() == nullptr) {
+    s.reset(new ch_bidirectional<Profile>{});
+  }
+  return *s.get();
+}
+
+template <typename Profile>
+ch_preprocessor<Profile>& get_ch_preprocessor() {
+  // Make preprocessor globally shared, not thread-local
+  static ch_preprocessor<Profile> global_preprocessor;
+  return global_preprocessor;
 }
 
 /*
@@ -1043,6 +1059,138 @@ std::optional<path> route_dijkstra(ways const& w,
       });
 }
 
+
+template <typename Profile>
+std::optional<path> route_ch_fixed(ways const& w,
+                                   lookup const& l,
+                                   location const& from,
+                                   location const& to,
+                                   match_view_t from_match,
+                                   match_view_t to_match,
+                                   cost_t const max,
+                                   direction const dir,
+                                   bitvec<node_idx_t> const* blocked,
+                                   sharing_data const* sharing,
+                                   elevation_storage const* elevations) {
+  if (auto const direct = try_direct(from, to); direct.has_value()) {
+    return *direct;
+  }
+
+  // Note: Static assertion in ch_preprocessor ensures this only compiles for car profiles
+
+  // Get CH preprocessor and bidirectional search
+  auto& preprocessor = get_ch_preprocessor<Profile>();
+  auto& bidir = get_ch_bidirectional<Profile>();
+  
+  // One-time initialization and preprocessing using std::once_flag
+  static std::once_flag ch_once;
+  std::call_once(ch_once, [&] {
+    preprocessor.initialize(w, *w.r_, sharing, elevations);
+    fmt::println("CH: Running global preprocessing (thread-safe)...");
+    preprocessor.preprocess();
+    fmt::println("CH: Global preprocessing complete");
+  });
+
+  // Find best path among all start/end combinations
+  std::optional<path> best_path;
+  cost_t best_cost = kInfeasible;
+
+  for (auto const [i, start] : utl::enumerate(from_match)) {
+    for (auto const* start_nc : {&start.left_, &start.right_}) {
+      if (!start_nc->valid() || start_nc->cost_ >= max) continue;
+      
+      for (auto const [j, end] : utl::enumerate(to_match)) {
+        if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
+          continue;
+        }
+        
+        for (auto const* end_nc : {&end.left_, &end.right_}) {
+          if (!end_nc->valid() || end_nc->cost_ >= max) continue;
+          
+          // Reset bidirectional search
+          bidir.reset(max, from, to, preprocessor.get_node_levels());
+          
+          // Add start nodes
+          Profile::resolve_start_node(*w.r_, start.way_, start_nc->node_, from.lvl_, dir, 
+                                     [&](auto const& node) {
+            bidir.add_start(w, *w.r_, typename Profile::label{node, start_nc->cost_}, sharing);
+          });
+          
+          // Add end nodes  
+          Profile::resolve_start_node(*w.r_, end.way_, end_nc->node_, to.lvl_, opposite(dir),
+                                     [&](auto const& node) {
+            bidir.add_end(w, *w.r_, typename Profile::label{node, end_nc->cost_}, sharing);
+          });
+          
+          // Run bidirectional search
+          (void)bidir.run(w, *w.r_, max, blocked, sharing, elevations, dir, 
+                         preprocessor.get_node_levels());
+          
+          if (bidir.best_cost_ != kInfeasible && bidir.best_cost_ < best_cost) {
+            best_cost = bidir.best_cost_;
+            
+            // Create basic path - detailed reconstruction would require CH-specific logic
+            path::segment segment;
+            segment.cost_ = best_cost;
+            segment.dist_ = static_cast<distance_t>(best_cost);
+            segment.from_ = start_nc->node_;
+            segment.to_ = end_nc->node_;
+            segment.way_ = start.way_;
+            
+            best_path = path{
+              .cost_ = best_cost,
+              .dist_ = static_cast<double>(best_cost), // Convert to double
+              .elevation_ = elevation_storage::elevation{},
+              .segments_ = {segment},
+              .uses_elevator_ = false,
+              .track_node_ = node_idx_t::invalid()
+            };
+          }
+        }
+      }
+    }
+  }
+  
+  return best_path;
+}
+
+std::optional<path> route_ch(ways const& w,
+                             lookup const& l,
+                             search_profile const profile,
+                             location const& from,
+                             location const& to,
+                             cost_t const max,
+                             direction const dir,
+                             double const max_match_distance,
+                             bitvec<node_idx_t> const* blocked,
+                             sharing_data const* sharing,
+                             elevation_storage const* elevations) {
+  return with_profile(
+      profile, [&]<typename Profile>(Profile&&) -> std::optional<path> {
+        auto const from_match =
+            l.match<Profile>(from, false, dir, max_match_distance, blocked);
+        auto const to_match =
+            l.match<Profile>(to, true, dir, max_match_distance, blocked);
+
+        if (from_match.empty() || to_match.empty()) {
+          return std::nullopt;
+        }
+
+        // CH only works for car profiles - fall back to A* bidirectional for others
+        if constexpr (std::is_same_v<Profile, car> || 
+                      std::is_same_v<Profile, car_sharing<track_node_tracking>>) {
+          return route_ch_fixed<Profile>(w, l, from, to,
+                          from_match, to_match, max, dir, blocked, sharing,
+                          elevations);
+        } else {
+          // Fallback to bidirectional A* for non-car profiles
+          return route_bidirectional(w, l, get_bidirectional<Profile>(), from, to,
+                                     from_match, to_match, max, dir, blocked,
+                                     sharing, elevations);
+        }
+      });
+}
+
 std::vector<std::optional<path>> route(
     ways const& w,
     lookup const& l,
@@ -1102,15 +1250,20 @@ std::optional<path> route(ways const& w,
                                    sharing, elevations);
       });
     case routing_algorithm::kCH:
-      // Commented out broken CH implementation
-      throw utl::fail("CH routing not available");
-      /*
       return with_profile(profile, [&]<typename Profile>(Profile&&) {
-        return route_ch(w, l, get_ch<Profile>(), from, to,
-                        from_match, to_match, max, dir, blocked, sharing,
-                        elevations);
+        // CH only works for car profiles - fall back to A* bidirectional for others
+        if constexpr (std::is_same_v<Profile, car> || 
+                      std::is_same_v<Profile, car_sharing<track_node_tracking>>) {
+          return route_ch_fixed<Profile>(w, l, from, to,
+                          from_match, to_match, max, dir, blocked, sharing,
+                          elevations);
+        } else {
+          // Fallback to bidirectional A* for non-car profiles
+          return route_bidirectional(w, l, get_bidirectional<Profile>(), from, to,
+                                     from_match, to_match, max, dir, blocked,
+                                     sharing, elevations);
+        }
       });
-      */
   }
   throw utl::fail("not implemented");
 }
@@ -1142,12 +1295,8 @@ std::optional<path> route(ways const& w,
                                  max_match_distance, blocked, sharing,
                                  elevations);
     case routing_algorithm::kCH:
-      // Commented out broken CH implementation
-      throw utl::fail("CH routing not available");
-      /*
       return route_ch(w, l, profile, from, to, max, dir,
                       max_match_distance, blocked, sharing, elevations);
-      */
   }
   throw utl::fail("not implemented");
 }

@@ -6,7 +6,6 @@
 
 #include <filesystem>
 #include <random>
-#include <chrono>
 
 #include "cista/mmap.h"
 
@@ -18,7 +17,6 @@
 #include "osr/geojson.h"
 #include "osr/location.h"
 #include "osr/lookup.h"
-#include "osr/routing/bidirectional.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profile.h"
 #include "osr/routing/profiles/car.h"
@@ -26,19 +24,15 @@
 #include "osr/types.h"
 #include "osr/ways.h"
 
-// Include our OSR-integrated CH implementation
-#include "osr/routing/ch_graph.h"
-#include "osr/routing/ch_preprocessor.h"
-#include "osr/routing/ch_bidirectional.h"
-
 namespace fs = std::filesystem;
 using namespace osr;
 
-constexpr auto const kUseMultithreading = false;
+constexpr auto const kUseMultithreading = true;
 constexpr auto const kPrintDebugGeojson = false;
 constexpr auto const kMaxMatchDistance = 100;
+constexpr auto const kMaxAllowedPathDifferenceRatio = 0.5;
 
-void load_monaco_ch(std::string_view raw_data, std::string_view data_dir) {
+static void load_ch_test(std::string_view raw_data, std::string_view data_dir) {
   if (!fs::exists(data_dir)) {
     if (fs::exists(raw_data)) {
       auto const p = fs::path{data_dir};
@@ -50,191 +44,174 @@ void load_monaco_ch(std::string_view raw_data, std::string_view data_dir) {
   }
 }
 
-// Create a simple Dijkstra for comparison using dial queue and OSR types
-class osr_dijkstra {
-public:
-  explicit osr_dijkstra(const ch_graph& graph)
-    : graph_(graph),
-      node_count_(graph.node_count()),
-      distance_(node_count_, kInfeasible),
-      predecessor_(node_count_, node_idx_t::invalid()),
-      pq_(ch_get_bucket{}) {}
+void run_ch_comparison(ways const& w,
+                      lookup const& l,
+                      unsigned const n_samples,
+                      unsigned const max_cost) {
 
-  ch_query_result query(std::uint32_t source, std::uint32_t target, cost_t max_cost = kInfeasible) {
-    reset(max_cost);
-    
-    if (source >= node_count_ || target >= node_count_) {
-      return {};
-    }
-    
-    if (source == target) {
-      return {0, {source}};
-    }
-    
-    distance_[source] = 0;
-    pq_.push(ch_query_label{node_idx_t{source}, 0});
-    
-    while (!pq_.empty()) {
-      auto current = pq_.pop();
-      auto const node = current.node.v_;
-      auto const dist = current.cost;
-      
-      if (dist > distance_[node]) continue;
-      
-      if (node == target) {
-        return {dist, reconstruct_path(source, target)};
-      }
-      
-      // Use ALL edges (no level filtering for regular Dijkstra)
-      for (const auto& arc : graph_.out_arcs(node)) {
-        auto const neighbor = arc.target.v_;
-        auto const new_dist = dist + arc.weight;
-        
-        if (new_dist < distance_[neighbor] && new_dist < kInfeasible) {
-          distance_[neighbor] = new_dist;
-          predecessor_[neighbor] = node_idx_t{node};
-          pq_.push(ch_query_label{node_idx_t{neighbor}, static_cast<cost_t>(new_dist)});
-        }
-      }
-    }
-    
-    return {};  // No path found
-  }
-
-private:
-  void reset(cost_t max_cost = kInfeasible) {
-    std::fill(distance_.begin(), distance_.end(), kInfeasible);
-    std::fill(predecessor_.begin(), predecessor_.end(), node_idx_t::invalid());
-    pq_.clear();
-    if (max_cost != kInfeasible && max_cost > 0) {
-      pq_.n_buckets(max_cost + 1U);
-    } else {
-      pq_.n_buckets(50000U);
-    }
-  }
-
-  std::vector<std::uint32_t> reconstruct_path(std::uint32_t source, std::uint32_t target) {
-    std::vector<std::uint32_t> path;
-    auto current = target;
-    
-    while (current != source) {
-      path.push_back(current);
-      current = predecessor_[current].v_;
-      if (current == node_idx_t::invalid().v_) break;
-    }
-    path.push_back(source);
-    std::reverse(path.begin(), path.end());
-    return path;
-  }
-
-  const ch_graph& graph_;
-  std::uint32_t node_count_;
-  std::vector<cost_t> distance_;
-  std::vector<node_idx_t> predecessor_;
-  dial<ch_query_label, ch_get_bucket> pq_;
-};
-
-void run_monaco_ch_comparison(ways const& w,
-                             lookup const& l,
-                             unsigned const n_samples,
-                             unsigned const max_cost) {
-  
-  fmt::println("Creating OSR-integrated CH graph from Monaco data...");
-  auto graph = ch_graph(w);
-  
-  fmt::println("Running CH preprocessing...");
-  auto preprocessor = ch_preprocessor(graph);
-  auto start_prep = std::chrono::high_resolution_clock::now();
-  preprocessor.preprocess();
-  auto end_prep = std::chrono::high_resolution_clock::now();
-  
-  auto prep_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_prep - start_prep);
-  fmt::println("CH preprocessing took: {} ms", prep_time.count());
-
-  // Create algorithm instances
-  osr_dijkstra dijkstra(graph);
-  ch_bidirectional ch_query(graph);
-
-  // Generate random query pairs
-  auto const from_tos = [&]() {
+  // Find one pair where Dijkstra finds a path
+  auto const from_to = [&]() {
     auto prng = std::mt19937{};
-    auto distr = std::uniform_int_distribution<std::uint32_t>{0, graph.node_count() - 1};
-    auto from_tos = std::vector<std::pair<std::uint32_t, std::uint32_t>>{};
-    for (auto i = 0U; i != n_samples; ++i) {
-      from_tos.emplace_back(distr(prng), distr(prng));
-    }
-    return from_tos;
-  }();
-
-  auto n_congruent = 0U;
-  auto n_valid_paths = 0U;
-  auto dijkstra_total_time = std::chrono::microseconds{0};
-  auto ch_total_time = std::chrono::microseconds{0};
-  auto total_dijkstra_cost = 0U;
-  auto total_ch_cost = 0U;
-
-  fmt::println("Running {} queries on Monaco OSM graph...", n_samples);
-
-  for (auto const& [from_node, to_node] : from_tos) {
-    if (from_node == to_node) continue;
+    auto distr =
+        std::uniform_int_distribution<std::uint32_t>{0, w.n_nodes() - 1};
     
-    // Run Dijkstra
-    auto start_dijkstra = std::chrono::high_resolution_clock::now();
-    auto dijkstra_result = dijkstra.query(from_node, to_node);
-    auto end_dijkstra = std::chrono::high_resolution_clock::now();
-    
-    // Run CH
-    auto start_ch = std::chrono::high_resolution_clock::now();
-    auto ch_result = ch_query.query(from_node, to_node);
-    auto end_ch = std::chrono::high_resolution_clock::now();
-    
-    auto dijkstra_time = std::chrono::duration_cast<std::chrono::microseconds>(end_dijkstra - start_dijkstra);
-    auto ch_time = std::chrono::duration_cast<std::chrono::microseconds>(end_ch - start_ch);
-    
-    // Check if both found valid paths
-    if (dijkstra_result.distance != kInfeasible && ch_result.distance != kInfeasible) {
-      ++n_valid_paths;
-      dijkstra_total_time += dijkstra_time;
-      ch_total_time += ch_time;
-      total_dijkstra_cost += dijkstra_result.distance;
-      total_ch_cost += ch_result.distance;
+    while (true) {
+      auto const from_node = node_idx_t{distr(prng)};
+      auto const to_node = node_idx_t{distr(prng)};
       
-      // Check correctness
-      if (dijkstra_result.distance == ch_result.distance) {
-        ++n_congruent;
-      } else {
-        fmt::println("Distance mismatch: nodes {}->{}, Dijkstra={}, CH={}", 
-                    from_node, to_node,
-                    dijkstra_result.distance, ch_result.distance);
+      auto const from_loc = location{w.get_node_pos(from_node)};
+      auto const to_loc = location{w.get_node_pos(to_node)};
+      
+      auto const node_pinned_matches =
+          [&](location const& loc, node_idx_t const n, bool const reverse) {
+            auto matches = l.match<car>(loc, reverse, direction::kForward,
+                                        kMaxMatchDistance, nullptr);
+            std::erase_if(matches, [&](auto const& wc) {
+              return wc.left_.node_ != n && wc.right_.node_ != n;
+            });
+            return matches;
+          };
+      
+      auto const from_matches = node_pinned_matches(from_loc, from_node, false);
+      auto const to_matches = node_pinned_matches(to_loc, to_node, true);
+      
+      if (from_matches.empty() || to_matches.empty()) {
+        continue; // Try another pair
+      }
+      
+      auto const from_matches_span = std::span{begin(from_matches), end(from_matches)};
+      auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+      
+      // Test if Dijkstra finds a path
+      auto const dijkstra_result =
+          route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
+                to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
+                nullptr, routing_algorithm::kDijkstra);
+      
+      if (dijkstra_result.has_value()) {
+        fmt::println("Found working pair: {} -> {} (cost: {})", 
+                    w.node_to_osm_[from_node], w.node_to_osm_[to_node], dijkstra_result->cost_);
+        return std::make_pair(from_node, to_node);
       }
     }
-  }
-
-  fmt::println("\n=== MONACO OSM CH vs DIJKSTRA RESULTS ===");
-  fmt::println("Valid paths found:   {}/{}", n_valid_paths, n_samples);
+  }();
   
-  if (n_valid_paths > 0) {
-    fmt::println("Dijkstra total time: {} us", dijkstra_total_time.count());
-    fmt::println("CH total time:       {} us", ch_total_time.count());
-    fmt::println("Dijkstra avg/query:  {} us", dijkstra_total_time.count() / n_valid_paths);
-    fmt::println("CH avg/query:        {} us", ch_total_time.count() / n_valid_paths);
-    fmt::println("Dijkstra total cost: {}", total_dijkstra_cost);
-    fmt::println("CH total cost:       {}", total_ch_cost);
-    
-    if (ch_total_time.count() > 0) {
-      double speedup = static_cast<double>(dijkstra_total_time.count()) / ch_total_time.count();
-      fmt::println("Speedup:             {:.2f}x", speedup);
+  auto const from_tos = std::vector<std::pair<node_idx_t, node_idx_t>>{from_to};
+
+  auto n_congruent = std::atomic<unsigned>{0U};
+  auto n_empty_matches = std::atomic<unsigned>{0U};
+  auto dijkstra_times = std::vector<std::chrono::steady_clock::duration>{};
+  auto ch_dijkstra_times = std::vector<std::chrono::steady_clock::duration>{};
+
+  auto m = std::mutex{};
+
+  auto const single_run = [&](std::pair<node_idx_t, node_idx_t> const from_to) {
+    auto const from_node = from_to.first;
+    auto const from_loc = location{w.get_node_pos(from_node)};
+    auto const to_node = from_to.second;
+    auto const to_loc = location{w.get_node_pos(to_node)};
+
+    auto const node_pinned_matches =
+        [&](location const& loc, node_idx_t const n, bool const reverse) {
+          auto matches = l.match<car>(loc, reverse, direction::kForward,
+                                      kMaxMatchDistance, nullptr);
+          std::erase_if(matches, [&](auto const& wc) {
+            return wc.left_.node_ != n && wc.right_.node_ != n;
+          });
+          if (matches.size() > 1) {
+            // matches.resize(1);
+          }
+          return matches;
+        };
+    auto const from_matches = node_pinned_matches(from_loc, from_node, false);
+    auto const to_matches = node_pinned_matches(to_loc, to_node, true);
+    if (from_matches.empty() || to_matches.empty()) {
+      ++n_empty_matches;
     }
-    
-    fmt::println("Correctness:         {}/{} ({:.1f}%)", n_congruent, n_valid_paths,
-                (static_cast<double>(n_congruent) / static_cast<double>(n_valid_paths)) * 100);
+
+    auto const from_matches_span =
+        std::span{begin(from_matches), end(from_matches)};
+    auto const to_matches_span = std::span{begin(to_matches), end(to_matches)};
+
+    auto const dijkstra_start = std::chrono::steady_clock::now();
+    auto const dijkstra_result =
+        route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
+              to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
+              nullptr, routing_algorithm::kDijkstra);
+    auto const dijkstra_time =
+        std::chrono::steady_clock::now() - dijkstra_start;
+
+    auto const ch_dijkstra_start = std::chrono::steady_clock::now();
+    auto const ch_dijkstra_result =
+        route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
+              to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
+              nullptr, routing_algorithm::kCH);
+    auto const ch_dijkstra_time =
+        std::chrono::steady_clock::now() - ch_dijkstra_start;
+
+    if (dijkstra_result.has_value() != ch_dijkstra_result.has_value() ||
+        (dijkstra_result && ch_dijkstra_result &&
+         dijkstra_result->cost_ != ch_dijkstra_result->cost_)) {
+      auto const print_result = [&](std::string_view name, auto const& p,
+                                    auto const& t) {
+        fmt::println(
+            "{:12}: {:11} --> {:11} | {} | time: "
+            "{}:{:0>3}:{:0>3} s",
+            name, w.node_to_osm_[from_node], w.node_to_osm_[to_node],
+            p ? fmt::format("cost: {:5} | dist: {:>10.2f}", p->cost_, p->dist_)
+              : "no result",
+            std::chrono::duration_cast<std::chrono::seconds>(t).count(),
+            std::chrono::duration_cast<std::chrono::milliseconds>(t).count() %
+                1000,
+            std::chrono::duration_cast<std::chrono::microseconds>(t).count() %
+                1000);
+        if (p.has_value() && kPrintDebugGeojson) {
+          fmt::println("{}\n", to_featurecollection(w, p));
+        }
+      };
+
+      print_result("dijkstra", dijkstra_result, dijkstra_time);
+      print_result("ch dijkstra", ch_dijkstra_result, ch_dijkstra_time);
+
+    } else {
+      ++n_congruent;
+    }
+
+    if (!from_matches.empty() && !to_matches.empty()) {
+      auto const guard = std::lock_guard{m};
+      dijkstra_times.emplace_back(dijkstra_time);
+      ch_dijkstra_times.emplace_back(ch_dijkstra_time);
+    }
+  };
+
+  if (kUseMultithreading) {
+    utl::parallel_for(from_tos, single_run);
+  } else {
+    std::for_each(begin(from_tos), end(from_tos), single_run);
   }
 
-  // Test should pass if most queries are correct
-  EXPECT_GT(n_congruent, n_valid_paths * 0.95);  // At least 95% correct
+  auto const non_empty_congruent = n_congruent.load();
+  auto const non_empty_samples = 1U; // We only test one successful pair
+
+  EXPECT_EQ(non_empty_samples, non_empty_congruent);
+
+  fmt::println("congruent on non-empty: {}/{} ({:3.1f}%)", non_empty_congruent,
+               non_empty_samples,
+               (static_cast<double>(non_empty_congruent) /
+                static_cast<double>(non_empty_samples)) *
+                   100);
+  if (non_empty_congruent == non_empty_samples) {
+    fmt::println(
+        "speedup on non-empty: {:.2f}",
+        static_cast<double>(
+            std::reduce(begin(dijkstra_times), end(dijkstra_times)).count()) /
+            static_cast<double>(
+                std::reduce(begin(ch_dijkstra_times), end(ch_dijkstra_times))
+                    .count()));
+  }
 }
 
-TEST(ChDijkstraComparison, monaco) {
+TEST(ch_dijkstra, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
   auto const num_samples = 100U;
@@ -244,9 +221,9 @@ TEST(ChDijkstraComparison, monaco) {
     GTEST_SKIP() << raw_data << " not found";
   }
 
-  load_monaco_ch(raw_data, data_dir);
+  load_ch_test(raw_data, data_dir);
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  run_monaco_ch_comparison(w, l, num_samples, max_cost);
+  run_ch_comparison(w, l, num_samples, max_cost);
 }

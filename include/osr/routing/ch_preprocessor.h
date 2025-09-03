@@ -24,10 +24,9 @@ struct sharing_data;
 
 template <typename Profile>
 struct ch_preprocessor {
-  // CH implementation only works for car profiles (as per CLAUDE.md requirements)
-  static_assert(std::is_same_v<Profile, car> || 
-                std::is_same_v<Profile, car_sharing<track_node_tracking>>, 
-                "CH preprocessing only supports car profiles");
+  // CH implementation only works for the car profile
+  static_assert(std::is_same_v<Profile, car>,
+                "CH preprocessing only supports the car profile");
 
   static constexpr bool kDebugCH = true;
   static constexpr int kMaxCase4AddsToLog = 10;

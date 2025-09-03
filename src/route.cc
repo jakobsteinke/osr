@@ -1176,14 +1176,12 @@ std::optional<path> route_ch(ways const& w,
           return std::nullopt;
         }
 
-        // CH only works for car profiles - fall back to A* bidirectional for others
-        if constexpr (std::is_same_v<Profile, car> || 
-                      std::is_same_v<Profile, car_sharing<track_node_tracking>>) {
+        // CH ONLY for car; everyone else -> A* bidirectional
+        if constexpr (std::is_same_v<Profile, car>) {
           return route_ch_fixed<Profile>(w, l, from, to,
                           from_match, to_match, max, dir, blocked, sharing,
                           elevations);
         } else {
-          // Fallback to bidirectional A* for non-car profiles
           return route_bidirectional(w, l, get_bidirectional<Profile>(), from, to,
                                      from_match, to_match, max, dir, blocked,
                                      sharing, elevations);
@@ -1251,14 +1249,12 @@ std::optional<path> route(ways const& w,
       });
     case routing_algorithm::kCH:
       return with_profile(profile, [&]<typename Profile>(Profile&&) {
-        // CH only works for car profiles - fall back to A* bidirectional for others
-        if constexpr (std::is_same_v<Profile, car> || 
-                      std::is_same_v<Profile, car_sharing<track_node_tracking>>) {
+        // CH ONLY for car; everyone else -> A* bidirectional
+        if constexpr (std::is_same_v<Profile, car>) {
           return route_ch_fixed<Profile>(w, l, from, to,
                           from_match, to_match, max, dir, blocked, sharing,
                           elevations);
         } else {
-          // Fallback to bidirectional A* for non-car profiles
           return route_bidirectional(w, l, get_bidirectional<Profile>(), from, to,
                                      from_match, to_match, max, dir, blocked,
                                      sharing, elevations);

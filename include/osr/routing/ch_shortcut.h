@@ -119,14 +119,7 @@ public:
     }
     // else: ignore equal-or-worse shortcuts
   }
-  
-  // Legacy method for backward compatibility - determines direction automatically
-  void add_shortcut(node_idx_t from, node_idx_t to, node_idx_t via, cost_t cost, distance_t distance = 0U) {
-    // For now, add to both until we update all callers
-    add_forward_shortcut(from, to, via, cost, distance);
-    add_backward_shortcut(from, to, via, cost, distance);
-  }
-  
+
   // Get forward shortcuts from 'from' to 'to'
   std::vector<ch_shortcut> const* get_forward_shortcuts(node_idx_t from, node_idx_t to) const {
     auto const it = forward_shortcuts_.find({from, to});
@@ -307,11 +300,6 @@ public:
   void add_backward_shortcut(node_idx_t from, node_idx_t to, node_idx_t via, cost_t cost, distance_t distance = 0U) {
     std::lock_guard<std::mutex> lock(mutex_);
     shortcuts_.add_backward_shortcut(from, to, via, cost, distance);
-  }
-  
-  void add_shortcut(node_idx_t from, node_idx_t to, node_idx_t via, cost_t cost, distance_t distance = 0U) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    shortcuts_.add_shortcut(from, to, via, cost, distance);
   }
   
   std::optional<ch_shortcut> get_best_forward_shortcut(node_idx_t from, node_idx_t to) const {

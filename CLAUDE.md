@@ -49,7 +49,7 @@ The crucial part for connectivity is this: Let's say there exists a shortest pat
 1.: level(u) > level(v) > level(w): in that case our backward search can just take all inverted edges and the two searches meet at node u. 
 2.: level(u) < level(v) < level(w): in that case our forward search can just take all normal edges and the two searches meet at node w. 
 3.: level(u) < level(v) > level(w): forward search takes edge (u, v), backward search takes (inverted) edge (w, v), both searches meet at v
-4.: level(u) > level(v) < level(w): We assume that P is a shortest path, therefore the preproceesing must have produces a shortcut (u, w) via v because level(u) > level(v) and level(w) > level(v) and we did not find any witness, since P is a shortest path and every subpath of P is also a shortest subpath. If level(u) < level(w), the forward search can take this shortcut (u, w), so both searches meet at node w. If level(u) > level(w), the backward search can take the inverted shortcut (w, u), so both searches meet at node u.
+4.: level(u) > level(v) < level(w): We assume that P is a shortest path, therefore the preproceesing must have produced a shortcut (u, w) via v because level(u) > level(v) and level(w) > level(v) and we did not find any witness, since P is a shortest path and every subpath of P is also a shortest subpath. If level(u) < level(w), the forward search can take this shortcut (u, w), so both searches meet at node w. If level(u) > level(w), the backward search can take the inverted shortcut (w, u), so both searches meet at node u.
 
 Hence Level Filtering should work like this: 
 - Forward search: level filtering level(to) > level(from) (upward) ✅

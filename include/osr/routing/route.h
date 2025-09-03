@@ -23,7 +23,17 @@ struct dijkstra;
 template <typename Profile>
 struct bidirectional;
 
+template <typename Profile>
+struct ch_bidirectional;
+
 struct sharing_data;
+
+// Forward declarations for global instances
+template <typename Profile>
+bidirectional<Profile>& get_bidirectional();
+
+template <typename Profile>
+ch_bidirectional<Profile>& get_ch_bidirectional();
 
 struct path {
   struct segment {

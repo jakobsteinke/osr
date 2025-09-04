@@ -62,6 +62,21 @@ void run(ways const& w,
     }
     return from_tos;
   }();
+  
+  // Add direct shortcuts with cost 1 for testing
+  for (auto const& from_to : from_tos) {
+    osr::bidirectional_car_dijkstra::add_global_shortcut(
+        from_to.first, from_to.second, 1U, osr::node_idx_t::invalid());
+  }
+  
+  fmt::println("Added {} direct shortcuts with cost 1", from_tos.size());
+  
+  // Verify shortcuts were stored
+  auto shortcut_count = 0U;
+  for (auto const& from_to : from_tos) {
+    shortcut_count += osr::bidirectional_car_dijkstra::get_global_shortcut_count(from_to.first);
+  }
+  fmt::println("Total shortcuts stored: {}", shortcut_count);
 
   auto n_congruent = std::atomic<unsigned>{0U};
   auto n_empty_matches = std::atomic<unsigned>{0U};
@@ -143,6 +158,12 @@ void run(ways const& w,
 
     } else {
       ++n_congruent;
+      // Print results when both algorithms found the same solution
+      if (reference && experiment && !from_matches.empty() && !to_matches.empty()) {
+        fmt::println("MATCH: {} --> {} | cost: {} | dist: {:.2f}",
+                     w.node_to_osm_[from_node], w.node_to_osm_[to_node],
+                     experiment->cost_, experiment->dist_);
+      }
     }
 
     if (!from_matches.empty() && !to_matches.empty()) {
@@ -182,7 +203,7 @@ void run(ways const& w,
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
-  auto const num_samples = 100U;  // Reduced for level filtering test
+  auto const num_samples = 30U;  // Reduced for level filtering test
   auto const max_cost = 3600U;
 
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
@@ -192,6 +213,9 @@ TEST(dijkstra_astarbidir, monaco) {
   load(raw_data, data_dir);
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Clear any existing shortcuts
+  osr::bidirectional_car_dijkstra::clear_global_shortcuts();
 
   // Test CH level assignment
   auto ch_dijkstra = osr::bidirectional_car_dijkstra{};

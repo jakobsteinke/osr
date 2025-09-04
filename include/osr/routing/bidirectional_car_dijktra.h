@@ -235,13 +235,13 @@ struct bidirectional_car_dijkstra {
           }
           
           // CH level filtering: only relax edges to higher-level nodes
-          if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
+          /*if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
             if constexpr (kDebug) {
               std::cout << " -> FILTERED (level " << get_ch_level(neighbor.get_key()) 
                         << " <= " << get_ch_level(curr.get_key()) << ")\n";
             }
             return;
-          }
+          }*/
           
           auto const total = curr_cost + cost;
           if (total >= max) {
@@ -277,13 +277,13 @@ struct bidirectional_car_dijkstra {
     if (shortcuts_it != shortcuts_.end()) {
       for (auto const& sc : shortcuts_it->second) {
         // Apply CH level filtering to shortcuts too
-        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
+        /*if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
           if constexpr (kDebug) {
             std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
                       << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
           }
           continue;
-        }
+        }*/
         
         auto const total = curr_cost + sc.weight;
         if (total >= max) {
@@ -399,8 +399,8 @@ struct bidirectional_car_dijkstra {
   // CH level assignment
   ankerl::unordered_dense::map<node_idx_t, std::uint32_t, hash> ch_levels_;
   
-  // CH shortcuts
-  ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
+  // CH shortcuts (global storage)
+  static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
   
   void assign_ch_levels(ways const& w) {
     auto const n_nodes = w.n_nodes();
@@ -426,18 +426,33 @@ struct bidirectional_car_dijkstra {
     return it != ch_levels_.end() ? it->second : 0U;
   }
   
-  void add_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
+  static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
     shortcuts_[from].emplace_back(shortcut{to, weight, middle});
   }
   
-  std::size_t get_shortcut_count(node_idx_t from) const {
+  static std::size_t get_global_shortcut_count(node_idx_t from) {
     auto it = shortcuts_.find(from);
     return it != shortcuts_.end() ? it->second.size() : 0;
   }
   
-  void clear_shortcuts() {
+  static void clear_global_shortcuts() {
     shortcuts_.clear();
   }
+  
+  void add_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
+    add_global_shortcut(from, to, weight, middle);
+  }
+  
+  std::size_t get_shortcut_count(node_idx_t from) const {
+    return get_global_shortcut_count(from);
+  }
+  
+  void clear_shortcuts() {
+    clear_global_shortcuts();
+  }
 };
+
+// Static member definition
+inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_{};
 
 }  // namespace osr

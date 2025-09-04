@@ -1,159 +1,252 @@
-# Project Description: Bidirectional Dijkstra with Contraction Hierarchies (CH) for OSR (car profile)
+# Bidirectional Dijkstra with Contraction Hierarchies (CH) for OSR (car profile)
 
-<idea>
 ## General idea
 
-The general idea is that we want to add another routing algorithm to the OSR repository (only for the car profile!). It is a bidrectional dijkstra that works on a preprocessed graph using Contraction Hierachies (ch). So there are basically 2 phases:
+Add a new routing algorithm to OSR (only for the **car profile**): **Bidirectional Dijkstra on a Contraction Hierarchies (CH) graph**.  
+Two phases:
 
-1. **Preprocessing:** Apply ch-preprocessing to the graph (OSR doesn't work with a classical graph, more about this later).  
-2. **Querying:** Use the bidirectional Dijkstra with ch-level filtering (and slightly changed termination criterium) on the preprocessed graph to find the shortest path between 2 points.
+1. **Preprocessing (CH construction):** contract nodes, add shortcuts, respect turn restrictions.  
+2. **Querying (CH search):** bidirectional Dijkstra with CH level filtering and modified termination, proper meeting-point detection, and full shortcut unpacking.
 
-## Important: it only has to work for the car profile! + The random node ordering does not break correctness, so don't change this. The level filtering must be like specified in this document. Also this is a wrong assumption: 
-  "This indicates that the level filtering is too strict and preventing
-  connectivity. The problem is that with pure random ordering, the forward
-  search (which can only go to higher levels) and backward search (which can        
-  only go to lower levels) may not have overlapping paths in the hierarchy."
-  If it is implemented like described here, there should be no connectivity problems. VERY IMPORTANT: If that is not clear: the backward search should also go up in levels, so only take edges (u, v) where level(v) > level(u), but on the inverted graph
-
-If there are connectivity issues, there are missing shortcuts. Look at this correctness proof:
-Annahme o.b.d.A.: kürzeste Pfade
-sind eindeutig.
-Damit der kürzeste Pfad auch in
-G∗ gefunden wird, muss er in zwei
-Teile, “Up-Graph” und
-“Down-Graph” aufteilbar sein
-(bzgl. level).
-Es gibt einen Knoten v∗ mit dem
-höchsten level aller Knoten in
-einem kürzesten Pfad s-t
-Angenommen, es gäbe auf dem
-kürzesten Weg von s nach v∗ eine
-Folge von Knoten u, v, w mit
-level(u) > level(v) < level(w)
-(down-up).
-Dann wäre im Preprocessing ein
-Shortcut (u, w) erstellt worden
-Shortcut könnte immer noch eine
-Down-Kante sein - Argument
-wiederholen.
-Daraus folgt: Es muss einen Pfad
-s-v∗ in G∗ geben nur mit
-Up-Kanten, der genauso lang ist
-wie der kürzeste Pfad in G. Analog
-für Down-Graph.
-
+⚠️ Notes  
+- Only the **car profile** is required.  
+- Node ordering is **random** and remains correct.  
+- Level filtering must be applied exactly as specified.  
+- Connectivity problems indicate **missing shortcuts** (not wrong level filtering).
 
 ---
 
-The crucial part for connectivity is this: Let's say there exists a shortest path P that goes through the nodes u->v->w. Without loss of generality we assume that our forward search is currently at node u and our backward search is currently at node w. Let's go through all possible level assignments:
+## 1) Preprocessing (CH construction)
+
+### Node ordering
+- Assign each node a unique random level in `1..n`; define `<` by level: `u < v ⇔ level(u) < level(v)`.
+
+### Shortcut creation
+For each node `u` in ascending level order:
+- For each incoming `(v,u)` with `v > u`  
+- and each outgoing `(u,w)` with `w > u`  
+- if `<v,u,w>` **may be the only shortest path**, add a shortcut `(v,w)` with weight `w(v,u) + w(u,w)`.
+
+**Details**
+- **Witness search:** local Dijkstra from `v` on the **remaining graph** (`level(x) > level(u)`, `x ≠ u`), stopping when all targets `w` are settled or the distance bound is exceeded.
+- **Turn restrictions:** enforced using `car::adjacent` (local searches must honor OSR’s turn semantics).  
+- **Existing shortcuts are usable and must be handled like in the query:**
+  - When the local Dijkstra expands an edge that is a shortcut, apply the same **first/last real edge legality checks** (Cases 1–4, see below).  
+  - This ensures that shortcuts used inside witness searches also respect turn restrictions.  
+- If a real edge `(v,w)` exists but is heavier than the shortcut, reduce it to the shortcut weight.
+
+**Correctness of Preprocessing**
+Let's say there exists a shortest path P that goes through the nodes u->v->w. Without loss of generality we assume that our forward search is currently at node u and our backward search is currently at node w. Let's go through all possible level assignments:
 1.: level(u) > level(v) > level(w): in that case our backward search can just take all inverted edges and the two searches meet at node u. 
 2.: level(u) < level(v) < level(w): in that case our forward search can just take all normal edges and the two searches meet at node w. 
 3.: level(u) < level(v) > level(w): forward search takes edge (u, v), backward search takes (inverted) edge (w, v), both searches meet at v
 4.: level(u) > level(v) < level(w): We assume that P is a shortest path, therefore the preproceesing must have produced a shortcut (u, w) via v because level(u) > level(v) and level(w) > level(v) and we did not find any witness, since P is a shortest path and every subpath of P is also a shortest subpath. If level(u) < level(w), the forward search can take this shortcut (u, w), so both searches meet at node w. If level(u) > level(w), the backward search can take the inverted shortcut (w, u), so both searches meet at node u.
 
-Hence Level Filtering should work like this: 
-- Forward search: level filtering level(to) > level(from) (upward) ✅
-- Backward search: level filtering level(from) > level(to) (downward) ✅
+### What is a “normal edge” in the car profile?
 
-when contracting nodes, you must already consider existing shortcuts as normal edges of the graph. When you add shortcuts, you must already consider existing shortcuts. So when there is an edge (v, u) and a    shortcut (u, w) and level(v) > level(u) < level(w), create a shortcut from v to w. Test that the added shortcuts are          visible for the creation of other shortcuts.     
-The contraction must be ordered by node ordering (so first contract node with lowest level etc.)                                                                         
+A *normal edge* is the **atomic step** produced by `car::adjacent`: moving along **one segment** of a single way from index `i` to its neighbor `i±1` with a concrete travel **direction**, starting at intersection `node_idx_t at` and ending at `target`.
 
-## 1) Preprocessing (CH construction)
+It is convenient to describe this atomic step with an anchor (this is *exactly* the information you need to replay costs and test turn legality):
 
-First we have to determine a node ordering, each node should get a different level. For this project, the node ordering must be random, so with *n* nodes, each node must get a unique random level between 1 and *n*. This node ordering defines a total order `<`.
-
-Now we can start adding shortcuts to the graph:
-Algorithm 1:
-
-```text
-foreach u ∈ V ordered by < ascending do
-    foreach (v, u) ∈ E with v > u do
-        foreach (u, w) ∈ E with w > u do
-            if 〈v, u, w〉 “may be” the only shortest path from v to w then
-                E := E ∪ {(v, w)}  // use weight w(v, w) := w(v, u) + w(u, w)
+```
+struct turn_anchor {
+node_idx_t at; // intersection where the step begins/ends (node_idx_t)
+way_idx_t way; // global id of the way
+way_pos_t way_pos; // index of 'way' in node_ways_[at] (needed for is_restricted)
+direction dir; // travel direction along the way for this step
+uint16_t from; // local index in way_nodes_[way] at 'at'
+uint16_t to; // neighbor index (from±1) traversed in this step
+node_idx_t target; // OSR node reached by this atomic move
+};
 ```
 
-> **Mind v > u und w > u!**
+### Shortcut metadata
+Each shortcut `(v,w)` via `u` stores:
+- the **middle node** `u` (for recursive unpacking),  
+- the **first normal edge** (anchor) of the represented subpath (leaving `v`),  
+- the **last normal edge** (anchor) of the represented subpath (entering `w`).  
 
-### Definitions from the paper
-
-> “Such an edge added in Line 5 is called a shortcut edge or just shortcut. They only represent existing paths in the current graph and are used to preserve shortest paths if the node u and all its incident edges is removed from the graph. If an edge (v, w) already exists in G but has larger weight than a new shortcut (v, w), then the Line 5 only reduce the weight of the already existing edge.”
-
-Let’s also define witness paths:
-
-> “A path P = 〈v, . . . , w〉 6 = 〈v, u, w〉 between v and w with w(P ) ≤ w(〈v, u, w〉) is called a witness path or just witness for the triple v, u, w. The name is derived from the fact that such a path witnesses that 〈v, u, w〉 is not a shortest path or not the only shortest path and allows to omit a shortcut.”
-
-> “The whole step of finding witnesses and adding shortcuts for node u, Lines 2–5, is called the contraction of u. Because after that step, for all shortest s-t-paths P in G, with s, t > u, that have u in their interior, exists a shortest s-t-path P ′ in G without u in its interior. Applied recursively, it is easy to see that there even exists an shortest s-t-path P ′ with only nodes > u in its interior. In the context of the contraction of node u, an edge (v, u) ∈ E is called an incoming edge of u, (u, w) an outgoing edge of u. The nodes > u are called remaining nodes, the incident edges are called the remaining edges and the graph induced by the remaining nodes is called the remaining graph.  
-> The tuple (G = (V, E), <) consisting of the resulting graph G of Algorithm 1 and the node order < is called a contraction hierarchy (CH). The node order partitions the nodes into n distinct levels.”
-
-Important: Witness search must only explore the remaining graph, i.e. all nodes with level strictly greater than level(u) (and excluding u itself), to ensure shortcuts preserve shortest paths according to CH theory. During contraction of u, witness searches run strictly on the remaining graph (only nodes with level > level(u), excluding u) using the same turn-restricted expansion as queries; CH shortcuts may be used for speed, but must never bypass car::adjacent turn semantics.
-
-### Contraction of node *u* (“may be the only shortest path”)
-
-“This section fills in the details that are omitted in the pseudo code, especially the part how witness paths are located. We will first describe a general approach using Dĳkstra’s algorithm. Let G′ = (V′, E′) be the remaining graph after the contraction of the direct predecessor of u. For the contraction of a node u, we face a many-to-many shortest path problem from source nodes v ∈ S := {v | (v, u) ∈ E′} incident to incoming edges of u to all target nodes w ∈ T := {w | (u, w) ∈ E′} incident to outgoing edges of u. For such a pair v ≠ w, we want to decide whether 〈v, u, w〉, if it is a shortest v–w-path, is the only shortest v–w-path in G′.  
-A simple way to implement this is to perform for each source node v a forward shortest-path search starting at v in the current remaining graph G′ excluding u until all target nodes T \\ {v} are settled. Such a limited search is called a local search. Let d_v(w) be the shortest path distance found by this search. We add a shortcut edge if and only if d_v(w) > w(v, u) + w(u, w), i.e., if the shortest v–w-path excluding u will be longer. We can additionally stop the search from a node x when it has reached distance w(v, u) + max { w(u, w) | (u, w) ∈ E′ \\ {(u, v)} }. Mind that these local Dijkstras can use already existing shortcuts.”
-
-### OSR-specific aspects (car profile, turn restrictions)
-
-This is the theory but we have to add some additional logic since we work on the OSR repository (on the car profile). As you can see in the README, OSR does not work with a typical graph and we have turn restrictions. We can view turn restrictions as a relation between incoming edges of a node and its outgoing edges. Because depending on the incoming edge we used to get to this node, we may not be able to take all outgoing edges (e.g., when we drive with a car to a certain point using street A, we may not be allowed to turn right and take street B; on the other hand, if we drive to this point using street C, we may be allowed to use street B). These turn restrictions are considered in the `adjacent` function of the car profile (`include/osr/routing/profiles/car.h`).
-
-So in the preprocessing when we run the local Dijkstras, we have to consider these turn restrictions and only allow shortcuts for paths that are **not restricted** in the original graph. When we later run a query on this preprocessed graph, we have to know for which incoming edges of a node we can take which outgoing shortcuts.
-
-To do this (and also to later be able to reconstruct the found path), for a shortcut *v → w* via *u*, we have to store the information that this shortcut originally goes over *u*. Example: when we come to *v* from *x* and we want to take the shortcut from *v* to *w*, we have to **unpack** it and check if there are turn restrictions if we use *(v, u)* and come from *x*. In theory *(v, u)* could also be a shortcut, so we would need to unpack it **recursively** until we have a normal edge. **Mind that we don't have to unpack the entire shortcut path, we only have to fully unpack the very first edge, since only this edge is relevant for our turn restrictions.**
-
-**Result of preprocessing:** we obtain the preprocessed graph with additional shortcut edges (each shortcut edge stores the node it contracts, in other words shortcut *(v, w)* via *u* stores *u*).
+These two real-edge anchors allow legality checks between chained shortcuts using the same logic as `car::adjacent` (by comparing the **incoming** and **outgoing** way at a junction).
 
 ---
 
 ## 2) Querying (Bidirectional Dijkstra with CH level filtering)
 
-Now we can run the query with the bidirectional Dijkstra. The OSR repo already has a working bidirectional A* which can be taken as an inspiration (we don't need the heuristic though and we also have to make some other slight adjustments). The code for the bidirectional A* can be found in `include/osr/routing/bidirectional.h`, `include/osr/routing/route.h` and `src/route.cc`.
+### Level filtering
+- **Forward search:** relax only edges `(u,v)` with `level(v) > level(u)` (upward graph).  
+- **Backward search:** relax only edges `(u,v)` with `level(u) > level(v)` (downward graph, on the inverted direction).  
 
-Compared to a normal bidirectional Dijkstra we make some adjustments:
+### Edge relaxation semantics (very important)
+- **We only traverse edges that are legal under `car::adjacent`.**  
+- For **normal edges**, legality is determined directly by `car::adjacent` from the current `car::node` (which captures node, way, direction).  
+- For a **shortcut edge**, we **do not** blindly relax it:  
+  - To enter a shortcut `(v → …)`, use its **stored first normal edge** to determine the outgoing way at `v` and test turn restrictions against the **incoming way** of how you arrived at `v`.  
+  - To enter a shortcut in the opposite direction `(… → v)`, use its **stored last normal edge** to determine the incoming way at `v`.  
+  - Only if this check passes (i.e., `!is_restricted(...)`) do we relax the shortcut.  
+  - U-turn penalties and per-way costs are applied consistently with how `car::adjacent` would apply them at the entry/exit edges.
 
-- The query algorithm does **not** relax edges leading to nodes **lower** than the current node.  
-- This property is reflected in two search graphs. The upward graph  
-  \( G↑ := (V, E↑) \) with \( E↑ := \{ (u, v) ∈ E \mid u < v \} \)  
-  and, analogously, the downward graph  
-  \( G↓ := (V, E↓) \) with \( E↓ := \{ (u, v) ∈ E \mid u > v \} \).
-- We perform forward search in \( G↑ \) and a backward search in \( G↓ \).
-- Forward and backward search are interleaved, we keep track of a tentative shortest-path length and **abort the forward/backward search process when all keys in the respective priority queue are greater than the tentative shortest-path length (abort-on-success criterion)**. Note that **we are not allowed to abort the entire query as soon as both search scopes meet for the first time.**
+This guarantees that **every** relaxed step (normal or shortcut) is already **turn-legal** during the search.
 
-### Path reconstruction (shortcut unpacking)
+### Termination
+- Interleave forward and backward expansions; maintain best tentative distance `µ`.  
+- **Abort-on-success:** stop when the minimum key in **both** PQs exceeds `µ`.  
+- Do **not** terminate at the first frontier meeting.
 
-The query algorithm described above can return a shortest path in the contraction hierarchy. In order to output a complete description of the computed shortest path, we have to **unpack the shortcut edges** to obtain the represented subpaths in the original graph. We propose a **recursive unpacking** routine based on the fact that each shortcut edge represents a subpath, not necessarily in the original graph, consisting of exactly two edges. As long as there is a shortcut edge in the path, we replace it by the two edges that originated the creation of this shortcut. Finally, we will have a path without any shortcut edges, that is equivalent to a path in the original graph. Consider a shortcut *(v, w)* that represents a path 〈v, u, w〉. This can be done because **we always store the middle node u in the shortcut data structure itself.**
+---
 
-### OSR meeting-point and turn-restriction considerations
+## 3) Meeting-point detection (OSR/car-specific)
 
-- In OSR/car, **meeting at a node_idx_t alone is not sufficient**; we must meet on a full `car::node` (which encodes node, way, direction) to respect turn restrictions and possible U-turn penalties at/near the meeting point.  
-- Because `car::adjacent` explores only the arriving way at intersections (and jumps to neighbors on other ways), forward and backward searches might not visit identical `car::node`s even if they share the same `node_idx_t`. This affects both **shortcut creation** (local searches) and **meeting-point detection** during queries.  
-- Practical fixes include:
-  - When evaluating meetpoints, verify that forward and backward frontiers are **stitchable** respecting restrictions (akin to `handle_end_of_way_meetpoint` in the existing bidirectional A* in `include/osr/routing/bidirectional.h`).  
-  - Store enough info on shortcuts and **unpack at least the first edge** on use to check legality from the actual incoming way/direction.  
-  - Account for **U-turn penalties** when comparing candidate meetpoints.
+Meeting at a raw `node_idx_t` is **not sufficient** in OSR/car, because turn restrictions depend on the **entering way** and **leaving way**.  
+Instead, we must consider **car::nodes** `(node_idx_t, way, direction)`.
+
+### Exact procedure with code
+
+Assume forward search settled `node_idx_t = N` first; later, backward search settles the same `N` via some way `way_j`. We now enumerate forward-settled car-nodes at `N`, test stitchability, and pick the cheapest.
+
+```
+void consider_meetpoints_at_node(ways::routing const& w,
+  node_idx_t N,
+  way_idx_t way_j,
+  double& best_mu,
+  car::node& best_meet_cand) {
+
+  car::resolve_all(w, N, /level/{}, [&](car::node cand) {
+  if (!was_settled_forward(cand)) return;
+  way_pos_t incoming_way_pos = cand.way_;
+
+  way_pos_t outgoing_way_pos{};
+  bool found = false;
+  {
+    auto ways_at_N = w.node_ways_[N];
+    for (auto i = way_pos_t{0U}; i != ways_at_N.size(); ++i) {
+      if (ways_at_N[i] == way_j) { outgoing_way_pos = i; found = true; break; }
+    }
+  }
+  if (!found) return;
+
+  if (w.is_restricted<direction::kForward>(N, incoming_way_pos, outgoing_way_pos)) {
+    return;
+  }
+
+  double cand_total = total_cost(cand, way_j);
+
+  if (cand_total < best_mu) {
+    best_mu = cand_total;
+    best_meet_cand = cand;
+  }
+});
+}
+```
+
+Notes:
+- `was_settled_forward(cand)` means the forward PQ popped/settled that **car::node** `(N, cand.way_, cand.dir_)`.
+- `total_cost(cand, way_j)` should sum forward and backward costs (plus potential U-turn penalty if needed).
+- If backward settled `N` first, mirror the logic.
+
+---
+
+## 3a) Shortcut legality during query (and witness search)
+
+During the query (and the witness search), when checking if an edge `(v,w)` is usable after `(u,v)`, we must consider whether either edge is a shortcut.  
+There are **four cases**:
+
+- **Case 1: Both are normal edges**  
+  Use `car::adjacent` to test legality of `(u,v) → (v,w)` directly.  
+
+- **Case 2: `(u,v)` is normal, `(v,w)` is a shortcut**  
+  Use the **first normal edge** of `(v,w)` to test legality `(incoming = n.way_) → (outgoing = first_anchor.way_pos)`.  
+
+- **Case 3: `(u,v)` is a shortcut, `(v,w)` is normal**  
+  Use the **last normal edge** of `(u,v)` to test legality `(incoming = last_anchor.way_pos) → (outgoing = candidate normal edge’s way_pos)`.  
+
+- **Case 4: Both `(u,v)` and `(v,w)` are shortcuts**  
+  Use the **last** anchor of `(u,v)` and the **first** anchor of `(v,w)` to test legality `(last_anchor.way_pos) → (first_anchor.way_pos)`.
+
+### Code example for Case 3 (shortcut → normal)
+
+```
+template <direction SearchDir>
+std::pair<bool, cost_t>
+check_and_cost_normal_after_shortcut(
+ways::routing const& w,
+turn_anchor const& last_anchor,
+way_idx_t next_way,
+uint16_t next_from,
+uint16_t next_to,
+direction next_dir) {
+
+auto const v = last_anchor.at;
+
+way_pos_t incoming_way_pos = last_anchor.way_pos;
+
+way_pos_t outgoing_way_pos{};
+bool found = false;
+{
+auto const ways_at_v = w.node_ways_[v];
+for (auto i = way_pos_t{0U}; i != ways_at_v.size(); ++i) {
+if (ways_at_v[i] == next_way) { outgoing_way_pos = i; found = true; break; }
+}
+}
+if (!found) return {false, cost_t{}};
+
+if (w.is_restricted<SearchDir>(v, incoming_way_pos, outgoing_way_pos)) {
+return {false, cost_t{}};
+}
+
+auto const target_node = w.way_nodes_[next_way][next_to];
+auto const target_node_prop = w.node_properties_[target_node];
+if (car::node_cost(target_node_prop) == kInfeasible) return {false, cost_t{}};
+
+auto const target_way_prop = w.way_properties_[next_way];
+if (car::way_cost(target_way_prop, next_dir, 0U) == kInfeasible) return {false, cost_t{}};
+
+auto const is_u_turn =
+(outgoing_way_pos == incoming_way_pos) && (next_dir == opposite(last_anchor.dir));
+
+auto const dist = w.way_node_dist_[next_way][std::min(next_from, next_to)];
+cost_t step_cost =
+car::way_cost(target_way_prop, next_dir, dist) +
+car::node_cost(target_node_prop) +
+(is_u_turn ? car::kUturnPenalty : 0U);
+
+return {true, step_cost};
+}
+```
+
+
+---
+
+## 4) Path reconstruction (full shortcut unpacking, no extra restriction checks)
+
+After the query, reconstruct a complete path of **original OSR edges** by **fully unpacking every shortcut**:
+
+- A shortcut `(v,w)` via `u` expands into `<v,u>` + `<u,w>`.  
+- If `<v,u>` or `<u,w>` are themselves shortcuts, unpack recursively until only real edges remain.  
+- **Do not re-check restrictions** during reconstruction:  
+  - Restrictions were already enforced during the query using  
+    - `car::adjacent` (for normal edges) and  
+    - shortcut **first/last edge anchors** (for shortcuts).  
+
+The final path is a faithful, drivable sequence of original car-edges with correct costs and penalties.
 
 ---
 
 ## Testing
 
-We were given `test/dijkstra_astarbidir_test.cc`. We can adapt/copy this test so our implementation is tested (easiest by integrating our algorithm in `algorithms.h` and `route.h/cc`, analogous to the existing integration for A* Bi).
+- Base tests on `test/dijkstra_astarbidir_test.cc`, adapted for CH-Bidir-Dijkstra.  
+- Use **Monaco OSM** for compact regression.  
 
-I already downloaded the Monaco part and have `test/monaco` and `test/monaco.osm.pbf`. **We should test on this one, since it is the smallest.**
-
-We should highly consider this advice from my advisors (essentials paraphrased):
-
-- It is normal that two different algorithms for a route have the same **costs** but very different **paths** (path lengths differ, same duration; cost rounding to seconds increases this effect). Tests therefore **do not** check path equality. Still, reconstructed paths should make sense and match the costs.  
-- You can be inspired by the Bidir-A* implementation (esp. how it is wired into `route.cc`). But note differences: **early stopping criteria are different**, and **no heuristic** for our algorithm.  
-- Because `car::node` includes node+way+direction, meeting points must be checked at this granularity; **do not** only compare `node_idx_t`. Consider potential **U-turns** at/near the meeting point.  
-- Single PQ vs two PQs: for our CH bidir Dijkstra we can keep it simple (one PQ solution possible), but the exact wiring is up to our integration.
+Verify:
+- Shortest-path **costs** are correct (paths may differ geometrically vs. other algorithms).  
+- Meeting-point detection selects **stitchable candidates** under restrictions.  
+- Shortcut legality cases (1–4 above) are correctly handled (both in queries and witness searches).  
+- Reconstruction produces a path of **only original edges** (no shortcuts remain) and aligns with the computed cost.  
 
 ---
 
 ## Summary
 
-- Preprocessing: random total order `<`, run local Dijkstras with turn restrictions, add shortcuts *(v, w)* via *u* only when 〈v, u, w〉 may be the only shortest path, **store u** in the shortcut for later unpacking.  
-- Querying: bidirectional Dijkstra with **level filtering** on the CH graph (forward on `u < v` edges, backward on `u > v` edges), adjusted **abort-on-success** termination, and **meeting-point handling** that respects OSR car-profile turn restrictions and U-turn costs.  
-- Reconstruction: recursively **unpack** shortcuts, but only **fully unpack the first edge** at each step where turn legality from the incoming way matters.
-
-Note on working in this repo: when you add a new file, you have to run 'cmake -S . -B build -G "Visual Studio 17 2022" -DCMAKE_BUILD_TYPE=Debug' before building the project
-</idea>
+- **Preprocessing:** random levels; local Dijkstra on the remaining graph with `car::adjacent`; add `(v,w)` via `u`; store middle, first normal edge, last normal edge; handle shortcuts in witness searches like in queries.  
+- **Querying:** bidirectional Dijkstra with level filtering; only relax legal moves; for shortcuts, check legality using the first/last normal edges (Cases 1–4).  
+- **Meeting points:** determined at `car::node` granularity with `resolve_all` + `is_restricted`; code above shows the exact stitch selection; pick the cheapest valid meetpoint.  
+- **Reconstruction:** fully unpack all shortcuts into original edges; no extra restriction checks needed.

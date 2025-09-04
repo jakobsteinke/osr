@@ -1,6 +1,8 @@
 #pragma once
 
 #include <limits>
+#include <numeric>
+#include <random>
 
 #include "utl/verify.h"
 
@@ -29,6 +31,12 @@ struct bidirectional_car_dijkstra {
 
   struct get_bucket {
     cost_t operator()(label const& l) { return l.cost(); }
+  };
+  
+  struct shortcut {
+    node_idx_t target;    // destination node
+    cost_t weight;        // shortcut cost
+    node_idx_t middle;    // bypassed node (for reconstruction)
   };
 
   void clear_mp() {
@@ -225,6 +233,16 @@ struct bidirectional_car_dijkstra {
             std::cout << "  NEIGHBOR ";
             neighbor.print(std::cout, w);
           }
+          
+          // CH level filtering: only relax edges to higher-level nodes
+          if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
+            if constexpr (kDebug) {
+              std::cout << " -> FILTERED (level " << get_ch_level(neighbor.get_key()) 
+                        << " <= " << get_ch_level(curr.get_key()) << ")\n";
+            }
+            return;
+          }
+          
           auto const total = curr_cost + cost;
           if (total >= max) {
             if (SearchDir == direction::kForward) {
@@ -253,6 +271,50 @@ struct bidirectional_car_dijkstra {
             }
           }
         });
+    
+    // Process shortcuts from current node
+    auto const shortcuts_it = shortcuts_.find(curr.get_key());
+    if (shortcuts_it != shortcuts_.end()) {
+      for (auto const& sc : shortcuts_it->second) {
+        // Apply CH level filtering to shortcuts too
+        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
+          if constexpr (kDebug) {
+            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
+                      << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
+          }
+          continue;
+        }
+        
+        auto const total = curr_cost + sc.weight;
+        if (total >= max) {
+          if (SearchDir == direction::kForward) {
+            max_reached_1_ = true;
+          } else {
+            max_reached_2_ = true;
+          }
+          continue;
+        }
+        
+        // Create a node for the shortcut target (use way=0, dir=forward as placeholder)
+        auto const target_node = node{sc.target, 0U, direction::kForward};
+        if (total < max && costs[target_node.get_key()].update(
+                l, target_node, static_cast<cost_t>(total), curr)) {
+          
+          auto next = label{target_node, static_cast<cost_t>(total)};
+          // No tracking for shortcuts (no real way/node info)
+          pq.push(std::move(next));
+          
+          if constexpr (kDebug) {
+            std::cout << "  SHORTCUT to " << sc.target.v_ << " cost " << sc.weight 
+                      << " -> PUSHED\n";
+          }
+        } else {
+          if constexpr (kDebug) {
+            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> DOMINATED\n";
+          }
+        }
+      }
+    }
 
     handle_end_of_way_meetpoint<SearchDir, WithBlocked>(w, r, curr, costs, blocked, sharing, elevations);
 
@@ -333,6 +395,49 @@ struct bidirectional_car_dijkstra {
   cost_map cost2_;
   bool max_reached_1_;
   bool max_reached_2_;
+  
+  // CH level assignment
+  ankerl::unordered_dense::map<node_idx_t, std::uint32_t, hash> ch_levels_;
+  
+  // CH shortcuts
+  ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
+  
+  void assign_ch_levels(ways const& w) {
+    auto const n_nodes = w.n_nodes();
+    
+    // Create a vector with levels from 1 to n
+    std::vector<std::uint32_t> levels(n_nodes);
+    std::iota(levels.begin(), levels.end(), 1U);
+    
+    // Shuffle to randomize levels
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::shuffle(levels.begin(), levels.end(), gen);
+    
+    // Assign levels to nodes
+    ch_levels_.clear();
+    for (node_idx_t::value_t i = 0; i < n_nodes; ++i) {
+      ch_levels_[node_idx_t{i}] = levels[i];
+    }
+  }
+  
+  std::uint32_t get_ch_level(node_idx_t n) const {
+    auto it = ch_levels_.find(n);
+    return it != ch_levels_.end() ? it->second : 0U;
+  }
+  
+  void add_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
+    shortcuts_[from].emplace_back(shortcut{to, weight, middle});
+  }
+  
+  std::size_t get_shortcut_count(node_idx_t from) const {
+    auto it = shortcuts_.find(from);
+    return it != shortcuts_.end() ? it->second.size() : 0;
+  }
+  
+  void clear_shortcuts() {
+    shortcuts_.clear();
+  }
 };
 
 }  // namespace osr

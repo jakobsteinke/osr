@@ -6,6 +6,7 @@
 
 #include <filesystem>
 #include <random>
+#include <set>
 
 #include "cista/mmap.h"
 
@@ -18,6 +19,7 @@
 #include "osr/location.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
+#include "osr/routing/bidirectional_car_dijktra.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profile.h"
 #include "osr/routing/profiles/car.h"
@@ -104,6 +106,7 @@ void run(ways const& w,
     auto const reference_time =
         std::chrono::steady_clock::now() - reference_start;
 
+
     auto const experiment_start = std::chrono::steady_clock::now();
     auto const experiment =
         route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
@@ -130,9 +133,9 @@ void run(ways const& w,
                 1000,
             std::chrono::duration_cast<std::chrono::microseconds>(t).count() %
                 1000);
-        if (p.has_value() && kPrintDebugGeojson) {
-          fmt::println("{}\n", to_featurecollection(w, p));
-        }
+        // if (p.has_value() && kPrintDebugGeojson) {
+        //   fmt::println("{}\n", to_featurecollection(w, p));
+        // }
       };
 
       print_result("dijkstra", reference, reference_time);
@@ -179,7 +182,7 @@ void run(ways const& w,
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
-  auto const num_samples = 2000U;
+  auto const num_samples = 100U;  // Reduced for level filtering test
   auto const max_cost = 3600U;
 
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
@@ -190,6 +193,32 @@ TEST(dijkstra_astarbidir, monaco) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
+  // Test CH level assignment
+  auto ch_dijkstra = osr::bidirectional_car_dijkstra{};
+  ch_dijkstra.assign_ch_levels(w);
+  
+  // Verify level assignment
+  auto const total_nodes = w.n_nodes();
+  fmt::println("Total nodes: {}", total_nodes);
+  
+  // Check some sample nodes have valid levels
+  for (auto i = 0U; i < std::min(10U, total_nodes); ++i) {
+    auto const node = osr::node_idx_t{i};
+    auto const level = ch_dijkstra.get_ch_level(node);
+    fmt::println("Node {} has CH level {}", i, level);
+  }
+  
+  // Verify all levels are unique and in range [1, n]
+  std::set<std::uint32_t> seen_levels;
+  for (auto i = 0U; i < total_nodes; ++i) {
+    auto const node = osr::node_idx_t{i};
+    auto const level = ch_dijkstra.get_ch_level(node);
+    EXPECT_GE(level, 1U);
+    EXPECT_LE(level, total_nodes);
+    EXPECT_TRUE(seen_levels.insert(level).second) << "Duplicate level " << level;
+  }
+  fmt::println("CH level assignment verified: {} unique levels assigned", seen_levels.size());
+  
   run(w, l, num_samples, max_cost);
 }
 

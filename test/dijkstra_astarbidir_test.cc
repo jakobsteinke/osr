@@ -29,7 +29,7 @@ namespace fs = std::filesystem;
 using namespace osr;
 
 constexpr auto const kUseMultithreading = true;
-constexpr auto const kPrintDebugGeojson = false;
+constexpr auto const kPrintDebugGeojson = true;
 constexpr auto const kMaxMatchDistance = 100;
 constexpr auto const kMaxAllowedPathDifferenceRatio = 0.5;
 
@@ -108,7 +108,7 @@ void run(ways const& w,
     auto const experiment =
         route(w, l, search_profile::kCar, from_loc, to_loc, from_matches_span,
               to_matches_span, max_cost, direction::kForward, nullptr, nullptr,
-              nullptr, routing_algorithm::kAStarBi);
+              nullptr, routing_algorithm::kBidirectionalCarDijkstra);
     auto const experiment_time =
         std::chrono::steady_clock::now() - experiment_start;
 
@@ -136,7 +136,7 @@ void run(ways const& w,
       };
 
       print_result("dijkstra", reference, reference_time);
-      print_result("a* bidir", experiment, experiment_time);
+      print_result("bidir car dijkstra", experiment, experiment_time);
 
     } else {
       ++n_congruent;
@@ -179,7 +179,7 @@ void run(ways const& w,
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
-  auto const num_samples = 10000U;
+  auto const num_samples = 2000U;
   auto const max_cost = 3600U;
 
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {

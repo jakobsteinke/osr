@@ -37,10 +37,26 @@ struct bidirectional_car_dijkstra {
     cost_t operator()(label const& l) { return l.cost(); }
   };
   
+  struct turn_anchor {
+    node_idx_t at;          // intersection node
+    way_idx_t way;          // way ID  
+    way_pos_t way_pos;      // position in node_ways_[at]
+    direction dir;          // travel direction
+    std::uint16_t from, to; // way segment indices
+    node_idx_t target;      // target node
+    
+    // Default constructor for invalid anchor
+    turn_anchor() : at(node_idx_t::invalid()), way(way_idx_t::invalid()), 
+                    way_pos(0), dir(direction::kForward), from(0), to(0), 
+                    target(node_idx_t::invalid()) {}
+  };
+  
   struct shortcut {
-    node_idx_t target;    // destination node
-    cost_t weight;        // shortcut cost
-    node_idx_t middle;    // bypassed node (for reconstruction)
+    node_idx_t target;       // destination node
+    cost_t weight;           // shortcut cost
+    node_idx_t middle;       // bypassed node (for reconstruction)
+    turn_anchor first_real_edge;  // first normal edge in path
+    turn_anchor last_real_edge;   // last normal edge in path
   };
   
   struct edge_info {
@@ -48,6 +64,8 @@ struct bidirectional_car_dijkstra {
     node_idx_t to;
     cost_t cost;
     bool is_shortcut;
+    turn_anchor first_anchor;  // for shortcuts: first real edge
+    turn_anchor last_anchor;   // for shortcuts: last real edge
   };
 
   void clear_mp() {
@@ -288,13 +306,13 @@ struct bidirectional_car_dijkstra {
     if (shortcuts_it != shortcuts_.end()) {
       for (auto const& sc : shortcuts_it->second) {
         // Apply CH level filtering to shortcuts too
-        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
+        /*if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
           if constexpr (kDebug) {
             std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
                       << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
           }
           continue;
-        }
+        }*/
         
         auto const total = curr_cost + sc.weight;
         if (total >= max) {
@@ -437,8 +455,10 @@ struct bidirectional_car_dijkstra {
     return it != ch_levels_.end() ? it->second : 0U;
   }
   
-  static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
-    shortcuts_[from].emplace_back(shortcut{to, weight, middle});
+  static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, 
+                                  node_idx_t middle, turn_anchor first_real_edge, 
+                                  turn_anchor last_real_edge) {
+    shortcuts_[from].emplace_back(shortcut{to, weight, middle, first_real_edge, last_real_edge});
   }
   
   static std::size_t get_global_shortcut_count(node_idx_t from) {
@@ -448,10 +468,6 @@ struct bidirectional_car_dijkstra {
   
   static void clear_global_shortcuts() {
     shortcuts_.clear();
-  }
-  
-  void add_shortcut(node_idx_t from, node_idx_t to, cost_t weight, node_idx_t middle) {
-    add_global_shortcut(from, to, weight, middle);
   }
   
   std::size_t get_shortcut_count(node_idx_t from) const {
@@ -472,11 +488,40 @@ struct bidirectional_car_dijkstra {
       car::adjacent<direction::kBackward, false>(
           *w.r_, n, nullptr, nullptr, nullptr,
           [&](node const pred, std::uint32_t const cost, distance_t,
-              way_idx_t const, std::uint16_t, std::uint16_t,
+              way_idx_t const way, std::uint16_t from, std::uint16_t to,
               elevation_storage::elevation const, bool const) {
             auto const pred_level = get_ch_level(pred.n_);
             if (pred_level > u_level) {
-              incoming.push_back({pred.n_, u, static_cast<cost_t>(cost), false});
+              edge_info edge{pred.n_, u, static_cast<cost_t>(cost), false};
+              
+              // For normal edge, create turn anchor
+              // This edge goes from pred.n_ to u (n.n_)
+              edge.first_anchor.at = pred.n_;
+              edge.first_anchor.way = way;
+              edge.first_anchor.dir = opposite(n.dir_); // Backward search, so flip direction
+              edge.first_anchor.from = from;
+              edge.first_anchor.to = to;
+              edge.first_anchor.target = n.n_;
+              
+              // Find way_pos at pred.n_
+              auto const ways_at_pred = (*w.r_).node_ways_[pred.n_];
+              for (auto i = way_pos_t{0U}; i != ways_at_pred.size(); ++i) {
+                if (ways_at_pred[i] == way) {
+                  edge.first_anchor.way_pos = i;
+                  break;
+                }
+              }
+              
+              // Last anchor is at the destination (u)
+              edge.last_anchor.at = n.n_;
+              edge.last_anchor.way = way;
+              edge.last_anchor.dir = opposite(n.dir_);
+              edge.last_anchor.from = from;
+              edge.last_anchor.to = to;
+              edge.last_anchor.target = n.n_;
+              edge.last_anchor.way_pos = n.way_;
+              
+              incoming.push_back(edge);
             }
           });
     });
@@ -487,7 +532,10 @@ struct bidirectional_car_dijkstra {
       if (from_level > u_level) {
         for (auto const& sc : shortcut_list) {
           if (sc.target == u) {
-            incoming.push_back({from_node, u, sc.weight, true});
+            edge_info edge{from_node, u, sc.weight, true};
+            edge.first_anchor = sc.first_real_edge;
+            edge.last_anchor = sc.last_real_edge;
+            incoming.push_back(edge);
           }
         }
       }
@@ -506,11 +554,40 @@ struct bidirectional_car_dijkstra {
       car::adjacent<direction::kForward, false>(
           *w.r_, n, nullptr, nullptr, nullptr,
           [&](node const succ, std::uint32_t const cost, distance_t,
-              way_idx_t const, std::uint16_t, std::uint16_t,
+              way_idx_t const way, std::uint16_t from, std::uint16_t to,
               elevation_storage::elevation const, bool const) {
             auto const succ_level = get_ch_level(succ.n_);
             if (succ_level > u_level) {
-              outgoing.push_back({u, succ.n_, static_cast<cost_t>(cost), false});
+              edge_info edge{u, succ.n_, static_cast<cost_t>(cost), false};
+              
+              // For normal edge, create turn anchor
+              // This edge goes from u (n.n_) to succ.n_
+              edge.first_anchor.at = n.n_;
+              edge.first_anchor.way = way;
+              edge.first_anchor.dir = n.dir_;
+              edge.first_anchor.from = from;
+              edge.first_anchor.to = to;
+              edge.first_anchor.target = succ.n_;
+              edge.first_anchor.way_pos = n.way_;
+              
+              // Last anchor is at the destination (succ.n_)
+              edge.last_anchor.at = succ.n_;
+              edge.last_anchor.way = way;
+              edge.last_anchor.dir = n.dir_;
+              edge.last_anchor.from = from;
+              edge.last_anchor.to = to;
+              edge.last_anchor.target = succ.n_;
+              
+              // Find way_pos at succ.n_
+              auto const ways_at_succ = (*w.r_).node_ways_[succ.n_];
+              for (auto i = way_pos_t{0U}; i != ways_at_succ.size(); ++i) {
+                if (ways_at_succ[i] == way) {
+                  edge.last_anchor.way_pos = i;
+                  break;
+                }
+              }
+              
+              outgoing.push_back(edge);
             }
           });
     });
@@ -521,12 +598,47 @@ struct bidirectional_car_dijkstra {
       for (auto const& sc : shortcuts_it->second) {
         auto const target_level = get_ch_level(sc.target);
         if (target_level > u_level) {
-          outgoing.push_back({u, sc.target, sc.weight, true});
+          edge_info edge{u, sc.target, sc.weight, true};
+          edge.first_anchor = sc.first_real_edge;
+          edge.last_anchor = sc.last_real_edge;
+          outgoing.push_back(edge);
         }
       }
     }
     
     return outgoing;
+  }
+  
+  // Check if we can legally traverse from edge (v,u) to edge (u,w)
+  // Returns true if the turn is allowed according to turn restrictions
+  bool is_turn_allowed(ways const& w, 
+                       edge_info const& in_edge,   // (v, u)
+                       edge_info const& out_edge,  // (u, w)
+                       node_idx_t u) const {
+    // Get the incoming way_pos (at node u) and outgoing way_pos (at node u)
+    way_pos_t incoming_way_pos, outgoing_way_pos;
+    
+    // For incoming edge, we need the way position at u (the destination)
+    if (!in_edge.is_shortcut) {
+      // Normal edge: last_anchor is at u
+      incoming_way_pos = in_edge.last_anchor.way_pos;
+    } else {
+      // Shortcut: use last_anchor which represents the last real edge entering u
+      incoming_way_pos = in_edge.last_anchor.way_pos;
+    }
+    
+    // For outgoing edge, we need the way position at u (the source)
+    if (!out_edge.is_shortcut) {
+      // Normal edge: first_anchor is at u
+      outgoing_way_pos = out_edge.first_anchor.way_pos;
+    } else {
+      // Shortcut: use first_anchor which represents the first real edge leaving u
+      outgoing_way_pos = out_edge.first_anchor.way_pos;
+    }
+    
+    // Check turn restriction using OSR's is_restricted function
+    // Template parameter is search direction (forward for contraction)
+    return !(*w.r_).is_restricted<direction::kForward>(u, incoming_way_pos, outgoing_way_pos);
   }
   
   // Perform contraction of all nodes in ascending CH level order
@@ -552,10 +664,10 @@ struct bidirectional_car_dijkstra {
     constexpr auto const kMaxNodesToContract = 800U;
     
     for (auto const u : nodes_by_level) {
-      if (nodes_contracted >= kMaxNodesToContract) {
+      /*if (nodes_contracted >= kMaxNodesToContract) {
         fmt::println("Stopping contraction after {} nodes", kMaxNodesToContract);
         break;
-      }
+      }*/
       
       auto const node_shortcuts = contract_node(w, u);
       shortcuts_added += node_shortcuts;
@@ -574,15 +686,28 @@ struct bidirectional_car_dijkstra {
     
     std::size_t shortcuts_added = 0;
     auto const u_level = get_ch_level(u);
+    constexpr auto const kMaxShortcutsPerNode = 10U;
     
     // For each incoming edge (v, u) and outgoing edge (u, w)
     for (auto const& in_edge : incoming) {
       for (auto const& out_edge : outgoing) {
+        // Stop if we've created too many shortcuts for this node
+        if (shortcuts_added >= kMaxShortcutsPerNode) {
+          fmt::println("Reached max shortcuts limit ({}) for node {}", kMaxShortcutsPerNode, u.v_);
+          return shortcuts_added;
+        }
         auto const v = in_edge.from;
         auto const target = out_edge.to;
         
         // Skip self-loops
         if (v == target) {
+          continue;
+        }
+        
+        // Check if the turn from (v,u) to (u,w) is allowed
+        if (!is_turn_allowed(w, in_edge, out_edge, u)) {
+          fmt::println("Turn restriction prevents shortcut: {} -> {} -> {} (contracted node: {})",
+                       v.v_, u.v_, target.v_, u.v_);
           continue;
         }
         
@@ -598,7 +723,19 @@ struct bidirectional_car_dijkstra {
         
         // Only add shortcut if no cheaper witness path exists
         if (witness_cost >= shortcut_cost) {
-          add_global_shortcut(v, target, static_cast<cost_t>(shortcut_cost), u);
+          // Determine first and last real edges for the shortcut
+          turn_anchor first_real_edge, last_real_edge;
+          
+          // First real edge: reuse from incoming edge if it's a shortcut,
+          // otherwise use the incoming edge's first anchor
+          first_real_edge = in_edge.first_anchor;
+          
+          // Last real edge: reuse from outgoing edge if it's a shortcut,
+          // otherwise use the outgoing edge's last anchor  
+          last_real_edge = out_edge.last_anchor;
+          
+          add_global_shortcut(v, target, static_cast<cost_t>(shortcut_cost), u,
+                            first_real_edge, last_real_edge);
           ++shortcuts_added;
         } else {
           // fmt::println("Witness found: {} -> {} via remaining graph has cost {}, shortcut would be {}", 

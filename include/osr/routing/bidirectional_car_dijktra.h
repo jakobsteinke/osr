@@ -677,8 +677,8 @@ struct bidirectional_car_dijkstra {
       auto const node_shortcuts = contract_node(w, u);
       shortcuts_added += node_shortcuts;
       ++nodes_contracted;
-      fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
-                   u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
+      // fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
+      //              u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
     }
     
     fmt::println("Contraction complete: {} nodes contracted, {} shortcuts added", nodes_contracted, shortcuts_added);
@@ -698,7 +698,7 @@ struct bidirectional_car_dijkstra {
       for (auto const& out_edge : outgoing) {
         // Stop if we've created too many shortcuts for this node
         if (shortcuts_added >= kMaxShortcutsPerNode) {
-          fmt::println("Reached max shortcuts limit ({}) for node {}", kMaxShortcutsPerNode, u.v_);
+          // fmt::println("Reached max shortcuts limit ({}) for node {}", kMaxShortcutsPerNode, u.v_);
           return shortcuts_added;
         }
         auto const v = in_edge.from;
@@ -711,8 +711,8 @@ struct bidirectional_car_dijkstra {
         
         // Check if the turn from (v,u) to (u,w) is allowed
         if (!is_turn_allowed(w, in_edge, out_edge, u)) {
-          fmt::println("Turn restriction prevents shortcut: {} -> {} -> {} (contracted node: {})",
-                       v.v_, u.v_, target.v_, u.v_);
+          // fmt::println("Turn restriction prevents shortcut: {} -> {} -> {} (contracted node: {})",
+                       //v.v_, u.v_, target.v_, u.v_);
           continue;
         }
         

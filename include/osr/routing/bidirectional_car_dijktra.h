@@ -293,10 +293,10 @@ struct bidirectional_car_dijkstra {
           if (total >= max) {
             if (SearchDir == direction::kForward) {
               max_reached_1_ = true;
-              fmt::println("FORWARD search reached max cost {} at node {}", max, curr.get_key().v_);
+              //fmt::println("FORWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             } else {
               max_reached_2_ = true;
-              fmt::println("BACKWARD search reached max cost {} at node {}", max, curr.get_key().v_);
+              //fmt::println("BACKWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             }
             return;
           }
@@ -337,10 +337,10 @@ struct bidirectional_car_dijkstra {
         if (total >= max) {
           if (SearchDir == direction::kForward) {
             max_reached_1_ = true;
-            fmt::println("FORWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
+            //fmt::println("FORWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
           } else {
             max_reached_2_ = true;
-            fmt::println("BACKWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
+            //fmt::println("BACKWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
           }
           continue;
         }
@@ -919,15 +919,14 @@ struct bidirectional_car_dijkstra {
           });
       });
 
-      // relax existing shortcuts (still respecting level)
-      if (auto it = shortcuts_.find(u); it != shortcuts_.end()) {
-        for (auto const& sc : it->second) {
-          if (get_ch_level(sc.target) <= contracted_level) continue;
-          auto const nd = static_cast<cost_t>(d + sc.weight);
-          if (nd > P_max) continue;        // prune by P_max
-          relax(sc.target, nd);
-        }
-      }
+       if (auto it = shortcuts_.find(u); it != shortcuts_.end()) {
+         for (auto const& sc : it->second) {
+           if (get_ch_level(sc.target) <= contracted_level) continue;
+           auto const nd = static_cast<cost_t>(d + sc.weight);
+           if (nd > P_max) continue;        // prune by P_max
+           relax(sc.target, nd);
+         }
+       }
     }
 
     return dist;

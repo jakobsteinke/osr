@@ -28,12 +28,12 @@ For each node `u` in ascending level order:
 - if `<v,u,w>` **may be the only shortest path**, add a shortcut `(v,w)` with weight `w(v,u) + w(u,w)`.
 
 **Details**
-- **Witness search:** local Dijkstra from `v` on the **remaining graph** (`level(x) > level(u)`, `x ≠ u`), stopping when all targets `w` are settled or the distance bound is exceeded.
-- **Turn restrictions:** enforced using `car::adjacent` (local searches must honor OSR’s turn semantics).  
+- **Witness search:** local Dijkstra from `v` on the **remaining graph** (`level(x) > level(u)`, `x ≠ u`), stopping when all targets `w` are settled or the distance bound is exceeded. So these local Dijkstras should ignore the node u itself and all nodes with lower level than u. What are nodes with lower level than u? Nodes that have already been contracted. Once a node is contracted, it’s not allowed in later witness searches. So the Dijkstra of a witness search should mark u as already visited instantly and skip nodes with lower level (that already have been contracted). That way it ony explores paths that do not go through the node u currently under contraction, and any node that has already been contracted before.
+- **Turn restrictions:** enforced using `car::adjacent` (local searches must honor OSR’s turn semantics, take a look at include\osr\routing\profiles\car.h and include\osr\routing\dijkstra.h).  
 - **Existing shortcuts are usable and must be handled like in the query:**
   - When the local Dijkstra expands an edge that is a shortcut, apply the same **first/last real edge legality checks** (Cases 1–4, see below).  
   - This ensures that shortcuts used inside witness searches also respect turn restrictions.  
-- If a real edge `(v,w)` exists but is heavier than the shortcut, reduce it to the shortcut weight.
+- If an edge `(v,w)` exists but is heavier than the shortcut, we keep it there and add the shotcut as another edge from v to w. This is because depending on different turn restirctions we may only be able to use the "old" edge `(v,w)`. This way, the graph is not simple.
 
 **Correctness of Preprocessing**
 Let's say there exists a shortest path P that goes through the nodes u->v->w. Without loss of generality we assume that our forward search is currently at node u and our backward search is currently at node w. Let's go through all possible level assignments:

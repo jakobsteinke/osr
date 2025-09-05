@@ -57,6 +57,15 @@ struct bidirectional_car_dijkstra {
     node_idx_t middle;       // bypassed node (for reconstruction)
     turn_anchor first_real_edge;  // first normal edge in path
     turn_anchor last_real_edge;   // last normal edge in path
+    node_idx_t from;         // source node (for reverse index)
+    
+    // Constructor without from (for forward index)
+    shortcut(node_idx_t t, cost_t w, node_idx_t m, turn_anchor first, turn_anchor last)
+      : target(t), weight(w), middle(m), first_real_edge(first), last_real_edge(last), from(node_idx_t::invalid()) {}
+      
+    // Constructor with from (for reverse index)
+    shortcut(node_idx_t f, node_idx_t t, cost_t w, node_idx_t m, turn_anchor first, turn_anchor last)
+      : target(t), weight(w), middle(m), first_real_edge(first), last_real_edge(last), from(f) {}
   };
   
   struct edge_info {
@@ -311,13 +320,13 @@ struct bidirectional_car_dijkstra {
     if (shortcuts_it != shortcuts_.end()) {
       for (auto const& sc : shortcuts_it->second) {
         // Apply CH level filtering to shortcuts too
-        /*if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
+        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
           if constexpr (kDebug) {
             std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
                       << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
           }
           continue;
-        }*/
+        }
         
         auto const total = curr_cost + sc.weight;
         if (total >= max) {
@@ -436,6 +445,9 @@ struct bidirectional_car_dijkstra {
   // CH shortcuts (global storage)
   static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
   
+  // Reverse index: shortcuts by target node (for efficient incoming edge lookup)
+  static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_by_target_;
+  
   void assign_ch_levels(ways const& w) {
     auto const n_nodes = w.n_nodes();
     
@@ -463,8 +475,14 @@ struct bidirectional_car_dijkstra {
   static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, 
                                   node_idx_t middle, turn_anchor first_real_edge, 
                                   turn_anchor last_real_edge) {
+    // For testing: set all shortcut weights to 1
+    // weight = 1;
+    
+    // Add to forward index (shortcuts from 'from') - no 'from' field needed
     shortcuts_[from].emplace_back(shortcut{to, weight, middle, first_real_edge, last_real_edge});
-    // shortcuts_[from].emplace_back(shortcut{to, 1, middle, first_real_edge, last_real_edge});
+    
+    // Add to reverse index (shortcuts to 'to') - include 'from' field
+    shortcuts_by_target_[to].emplace_back(shortcut{from, to, weight, middle, first_real_edge, last_real_edge});
   }
   
   static std::size_t get_global_shortcut_count(node_idx_t from) {
@@ -474,6 +492,7 @@ struct bidirectional_car_dijkstra {
   
   static void clear_global_shortcuts() {
     shortcuts_.clear();
+    shortcuts_by_target_.clear();
   }
   
   std::size_t get_shortcut_count(node_idx_t from) const {
@@ -532,17 +551,16 @@ struct bidirectional_car_dijkstra {
           });
     });
     
-    // Check shortcuts pointing to u
-    for (auto const& [from_node, shortcut_list] : shortcuts_) {
-      auto const from_level = get_ch_level(from_node);
-      if (from_level > u_level) {
-        for (auto const& sc : shortcut_list) {
-          if (sc.target == u) {
-            edge_info edge{from_node, u, sc.weight, true};
-            edge.first_anchor = sc.first_real_edge;
-            edge.last_anchor = sc.last_real_edge;
-            incoming.push_back(edge);
-          }
+    // Check shortcuts pointing to u (using reverse index for efficiency)
+    auto const incoming_shortcuts_it = shortcuts_by_target_.find(u);
+    if (incoming_shortcuts_it != shortcuts_by_target_.end()) {
+      for (auto const& sc : incoming_shortcuts_it->second) {
+        auto const from_level = get_ch_level(sc.from);
+        if (from_level > u_level) {
+          edge_info edge{sc.from, u, sc.weight, true};
+          edge.first_anchor = sc.first_real_edge;
+          edge.last_anchor = sc.last_real_edge;
+          incoming.push_back(edge);
         }
       }
     }
@@ -694,15 +712,15 @@ struct bidirectional_car_dijkstra {
     auto const u_level = get_ch_level(u);
     constexpr auto const kMaxShortcutsPerNode = 50U;
     
-    // For each incoming edge (v, u) and outgoing edge (u, w)
+    // Target-aware batched witness search: for each predecessor v, collect all targets and run optimized Dijkstra
     for (auto const& in_edge : incoming) {
+      auto const v = in_edge.from;
+      
+      // Collect all potential targets with their required costs
+      std::vector<TargetNeed> target_needs;
+      std::vector<turn_anchor> last_anchors; // parallel to target_needs for anchor tracking
+      
       for (auto const& out_edge : outgoing) {
-        // Stop if we've created too many shortcuts for this node
-        if (shortcuts_added >= kMaxShortcutsPerNode) {
-          // fmt::println("Reached max shortcuts limit ({}) for node {}", kMaxShortcutsPerNode, u.v_);
-          return shortcuts_added;
-        }
-        auto const v = in_edge.from;
         auto const target = out_edge.to;
         
         // Skip self-loops
@@ -711,11 +729,9 @@ struct bidirectional_car_dijkstra {
         }
         
         // Check if the turn from (v,u) to (u,w) is allowed
-        if (!is_turn_allowed(w, in_edge, out_edge, u)) {
-          // fmt::println("Turn restriction prevents shortcut: {} -> {} -> {} (contracted node: {})",
-                       //v.v_, u.v_, target.v_, u.v_);
+        /*if (!is_turn_allowed(w, in_edge, out_edge, u)) {
           continue;
-        }
+        }*/
         
         auto const shortcut_cost = in_edge.cost + out_edge.cost;
         
@@ -724,28 +740,39 @@ struct bidirectional_car_dijkstra {
           continue;
         }
         
-        // Perform witness search from v to target
-        auto const witness_cost = witness_search(w, v, target, u_level, shortcut_cost);
+        // Skip if direct edge/shortcut already exists with cost <= need
+        if (has_direct_leq(w, v, target, static_cast<cost_t>(shortcut_cost))) {
+          continue;
+        }
+        
+        target_needs.push_back({target, static_cast<cost_t>(shortcut_cost)});
+        last_anchors.push_back(out_edge.last_anchor);
+      }
+      
+      // Skip if no valid targets
+      if (target_needs.empty()) {
+        continue;
+      }
+      
+      // Run target-aware witness search from v (stops early when all targets witnessed)
+      auto const distances = witness_search_batched_targets(w, v, u_level, target_needs);
+      
+      // Check each target against the witness search results
+      for (auto i = 0U; i < target_needs.size(); ++i) {
+        // Stop if we've created too many shortcuts
+        /*if (shortcuts_added >= kMaxShortcutsPerNode) {
+          return shortcuts_added;
+        }*/
+        
+        auto const& target_need = target_needs[i];
+        auto const dist_it = distances.find(target_need.w);
+        auto const witness_cost = (dist_it != distances.end()) ? dist_it->second : kInfeasible;
         
         // Only add shortcut if no cheaper witness path exists
-        if (witness_cost >= shortcut_cost) {
-          // Determine first and last real edges for the shortcut
-          turn_anchor first_real_edge, last_real_edge;
-          
-          // First real edge: reuse from incoming edge if it's a shortcut,
-          // otherwise use the incoming edge's first anchor
-          first_real_edge = in_edge.first_anchor;
-          
-          // Last real edge: reuse from outgoing edge if it's a shortcut,
-          // otherwise use the outgoing edge's last anchor  
-          last_real_edge = out_edge.last_anchor;
-          
-          add_global_shortcut(v, target, static_cast<cost_t>(shortcut_cost), u,
-                            first_real_edge, last_real_edge);
+        if (witness_cost >= target_need.need) {
+          add_global_shortcut(v, target_need.w, target_need.need, u,
+                            in_edge.first_anchor, last_anchors[i]);
           ++shortcuts_added;
-        } else {
-          // fmt::println("Witness found: {} -> {} via remaining graph has cost {}, shortcut would be {}", 
-          //              v.v_, target.v_, witness_cost, shortcut_cost);
         }
       }
     }
@@ -753,7 +780,131 @@ struct bidirectional_car_dijkstra {
     return shortcuts_added;
   }
   
-  // Witness search: local Dijkstra from start to target on remaining graph
+  struct TargetNeed {
+    node_idx_t w;
+    cost_t need;  // = cost(v,u) + cost(u,w)
+  };
+
+  // Check if there's a direct edge or shortcut from v to w with cost <= need
+  bool has_direct_leq(ways const& w, node_idx_t v, node_idx_t target, cost_t need) const {
+    // Check real out-edges of v
+    bool found = false;
+    car::resolve_all(*w.r_, v, level_t{}, [&](node const n){
+      car::adjacent<direction::kForward, false>(
+        *w.r_, n, nullptr, nullptr, nullptr,
+        [&](node const succ, std::uint32_t const c, distance_t,
+            way_idx_t const, std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool const) {
+          if (succ.n_ == target && c <= need) found = true;
+        });
+    });
+    
+    // Check shortcuts from v
+    if (!found) {
+      if (auto it = shortcuts_.find(v); it != shortcuts_.end()) {
+        for (auto const& sc : it->second) {
+          if (sc.target == target && sc.weight <= need) {
+            found = true;
+            break;
+          }
+        }
+      }
+    }
+    return found;
+  }
+
+  // Target-aware batched witness search with early stopping (bug-fixed version)
+  // Returns distances only for visited nodes (others treated as kInfeasible)
+  // Stops early when all targets are "witnessed"
+  std::unordered_map<node_idx_t, cost_t> witness_search_batched_targets(
+      ways const& w,
+      node_idx_t start,
+      std::uint32_t contracted_level,
+      std::vector<TargetNeed> const& targets) const {
+    using QItem = std::pair<cost_t, node_idx_t>;
+    std::priority_queue<QItem, std::vector<QItem>, std::greater<QItem>> pq;
+    std::unordered_map<node_idx_t, cost_t> dist;
+    dist.reserve(256);
+
+    // Aggregate minimal need per target node
+    ankerl::unordered_dense::map<node_idx_t, cost_t, hash> need;
+    need.reserve(targets.size());
+    for (auto const& t : targets) {
+      auto it = need.find(t.w);
+      if (it == need.end()) {
+        need.emplace(t.w, t.need);
+      } else if (t.need < it->second) {
+        it->second = t.need; // keep min per w
+      }
+    }
+    if (need.empty()) return dist;
+
+    auto recompute_min_need = [&](){
+      cost_t m = kInfeasible;
+      for (auto const& kv : need) {
+        if (kv.second < m) m = kv.second;
+      }
+      return m;
+    };
+    cost_t min_need = recompute_min_need();
+
+    auto relax = [&](node_idx_t v, cost_t nd) {
+      if (nd > min_need) return;
+      auto it = dist.find(v);
+      if (it == dist.end()) {
+        dist.emplace(v, nd);
+        pq.emplace(nd, v);
+      } else if (nd < it->second) {
+        it->second = nd;
+        pq.emplace(nd, v);
+      }
+    };
+
+    dist.emplace(start, 0U);
+    pq.emplace(0U, start);
+
+    while (!pq.empty()) {
+      auto [d, u] = pq.top(); 
+      pq.pop();
+
+      if (need.empty()) break;
+      if (d >= min_need) break;
+
+      // stale?
+      if (auto it = dist.find(u); it != dist.end() && d != it->second) continue;
+
+      // target satisfied?
+      if (auto it = need.find(u); it != need.end() && d <= it->second) {
+        need.erase(it);
+        if (need.empty()) break;
+        min_need = recompute_min_need();
+      }
+
+      // relax original edges
+      car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
+        car::adjacent<direction::kForward, false>(
+          *w.r_, n, nullptr, nullptr, nullptr,
+          [&](node const succ, std::uint32_t const cost, distance_t,
+              way_idx_t const, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const) {
+            if (get_ch_level(succ.n_) <= contracted_level) return;
+            relax(succ.n_, static_cast<cost_t>(d + cost));
+          });
+      });
+
+      // relax existing shortcuts
+      if (auto it = shortcuts_.find(u); it != shortcuts_.end()) {
+        for (auto const& sc : it->second) {
+          if (get_ch_level(sc.target) <= contracted_level) continue;
+          relax(sc.target, static_cast<cost_t>(d + sc.weight));
+        }
+      }
+    }
+
+    return dist;
+  }
+
+  // Original witness search: local Dijkstra from start to target on remaining graph
   // Returns the cost of the cheapest path found, or kInfeasible if no path exists
   cost_t witness_search(ways const& w, node_idx_t start, node_idx_t target, 
                         std::uint32_t contracted_level, cost_t distance_bound) const {
@@ -890,7 +1041,8 @@ private:
 public:
 };
 
-// Static member definition
+// Static member definitions
 inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_{};
+inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_by_target_{};
 
 }  // namespace osr

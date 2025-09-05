@@ -278,8 +278,8 @@ struct bidirectional_car_dijkstra {
           // CH level filtering: only relax edges to higher-level nodes
           auto const neighbor_level = get_ch_level(neighbor.get_key());
           auto const curr_level = get_ch_level(curr.get_key());
-          fmt::println("Level check: neighbor {} (level {}) vs curr {} (level {})", 
-                       neighbor.get_key().v_, neighbor_level, curr.get_key().v_, curr_level);
+          //fmt::println("Level check: neighbor {} (level {}) vs curr {} (level {})", 
+                       //neighbor.get_key().v_, neighbor_level, curr.get_key().v_, curr_level);
           
           if (neighbor_level <= curr_level) {
             if constexpr (kDebug) {
@@ -444,14 +444,27 @@ struct bidirectional_car_dijkstra {
   bool max_reached_1_;
   bool max_reached_2_;
   
-  // CH level assignment
-  ankerl::unordered_dense::map<node_idx_t, std::uint32_t, hash> ch_levels_;
-  
   // CH shortcuts (global storage)
   static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
   
   // Reverse index: shortcuts by target node (for efficient incoming edge lookup)
   static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_by_target_;
+  
+  // CH level assignment (global storage)
+  static ankerl::unordered_dense::map<node_idx_t, std::uint32_t, hash> ch_levels_;
+  
+  static void set_global_ch_level(node_idx_t n, std::uint32_t level) {
+    ch_levels_[n] = level;
+  }
+  
+  static std::uint32_t get_global_ch_level(node_idx_t n) {
+    auto it = ch_levels_.find(n);
+    return it != ch_levels_.end() ? it->second : 0U;
+  }
+  
+  static void clear_global_ch_levels() {
+    ch_levels_.clear();
+  }
   
   void assign_ch_levels(ways const& w) {
     auto const n_nodes = w.n_nodes();
@@ -465,16 +478,15 @@ struct bidirectional_car_dijkstra {
     std::mt19937 gen(rd());
     std::shuffle(levels.begin(), levels.end(), gen);
     
-    // Assign levels to nodes
-    ch_levels_.clear();
+    // Assign levels to nodes using global storage
+    clear_global_ch_levels();
     for (node_idx_t::value_t i = 0; i < n_nodes; ++i) {
-      ch_levels_[node_idx_t{i}] = levels[i];
+      set_global_ch_level(node_idx_t{i}, levels[i]);
     }
   }
   
   std::uint32_t get_ch_level(node_idx_t n) const {
-    auto it = ch_levels_.find(n);
-    return it != ch_levels_.end() ? it->second : 0U;
+    return get_global_ch_level(n);
   }
   
   static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, 
@@ -500,12 +512,21 @@ struct bidirectional_car_dijkstra {
     shortcuts_by_target_.clear();
   }
   
+  static void clear_global_data() {
+    clear_global_shortcuts();
+    clear_global_ch_levels();
+  }
+  
   std::size_t get_shortcut_count(node_idx_t from) const {
     return get_global_shortcut_count(from);
   }
   
   void clear_shortcuts() {
     clear_global_shortcuts();
+  }
+  
+  void clear_data() {
+    clear_global_data();
   }
   
   // Discover all incoming edges to node u from nodes with level > level(u)
@@ -1052,5 +1073,6 @@ public:
 // Static member definitions
 inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_{};
 inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_by_target_{};
+inline ankerl::unordered_dense::map<node_idx_t, std::uint32_t, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::ch_levels_{};
 
 }  // namespace osr

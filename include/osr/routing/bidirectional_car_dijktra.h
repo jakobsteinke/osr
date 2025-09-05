@@ -813,14 +813,13 @@ struct bidirectional_car_dijkstra {
     return found;
   }
 
-  // Target-aware batched witness search with early stopping (bug-fixed version)
-  // Returns distances only for visited nodes (others treated as kInfeasible)
-  // Stops early when all targets are "witnessed"
+  // Target-aware batched witness search with global P_max bound (standard CH logic)
   std::unordered_map<node_idx_t, cost_t> witness_search_batched_targets(
       ways const& w,
       node_idx_t start,
       std::uint32_t contracted_level,
       std::vector<TargetNeed> const& targets) const {
+
     using QItem = std::pair<cost_t, node_idx_t>;
     std::priority_queue<QItem, std::vector<QItem>, std::greater<QItem>> pq;
     std::unordered_map<node_idx_t, cost_t> dist;
@@ -834,22 +833,19 @@ struct bidirectional_car_dijkstra {
       if (it == need.end()) {
         need.emplace(t.w, t.need);
       } else if (t.need < it->second) {
-        it->second = t.need; // keep min per w
+        it->second = t.need;                // keep minimum per target
       }
     }
     if (need.empty()) return dist;
-
-    auto recompute_min_need = [&](){
-      cost_t m = kInfeasible;
-      for (auto const& kv : need) {
-        if (kv.second < m) m = kv.second;
-      }
-      return m;
-    };
-    cost_t min_need = recompute_min_need();
+    
+    // Compute P_max exactly after aggregating need
+    cost_t P_max = 0U;
+    for (auto const& kv : need) {
+      if (kv.second > P_max) P_max = kv.second;
+    }
 
     auto relax = [&](node_idx_t v, cost_t nd) {
-      if (nd > min_need) return;
+      if (nd > P_max) return;              // prune by P_max
       auto it = dist.find(v);
       if (it == dist.end()) {
         dist.emplace(v, nd);
@@ -864,39 +860,46 @@ struct bidirectional_car_dijkstra {
     pq.emplace(0U, start);
 
     while (!pq.empty()) {
-      auto [d, u] = pq.top(); 
+      auto [d, u] = pq.top();
       pq.pop();
 
-      if (need.empty()) break;
-      if (d >= min_need) break;
+      if (need.empty()) break;             // all targets witnessed
+      if (d > P_max) break;                // global batch bound reached (match Python logic)
 
       // stale?
       if (auto it = dist.find(u); it != dist.end() && d != it->second) continue;
 
-      // target satisfied?
-      if (auto it = need.find(u); it != need.end() && d <= it->second) {
-        need.erase(it);
-        if (need.empty()) break;
-        min_need = recompute_min_need();
+      // If u is a target and we reached it at cost <= its need, it's witnessed
+      if (auto it = need.find(u); it != need.end()) {
+        if (d <= it->second) {
+          need.erase(it);
+          if (need.empty()) break;
+          // NOTE: Do NOT change P_max here; P_max is a fixed global bound.
+        }
       }
 
-      // relax original edges
+      // relax original edges (remaining graph: level > contracted_level)
       car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
         car::adjacent<direction::kForward, false>(
           *w.r_, n, nullptr, nullptr, nullptr,
           [&](node const succ, std::uint32_t const cost, distance_t,
               way_idx_t const, std::uint16_t, std::uint16_t,
               elevation_storage::elevation const, bool const) {
+
             if (get_ch_level(succ.n_) <= contracted_level) return;
-            relax(succ.n_, static_cast<cost_t>(d + cost));
+            auto const nd = static_cast<cost_t>(d + cost);
+            if (nd > P_max) return;        // prune by P_max
+            relax(succ.n_, nd);
           });
       });
 
-      // relax existing shortcuts
+      // relax existing shortcuts (still respecting level)
       if (auto it = shortcuts_.find(u); it != shortcuts_.end()) {
         for (auto const& sc : it->second) {
           if (get_ch_level(sc.target) <= contracted_level) continue;
-          relax(sc.target, static_cast<cost_t>(d + sc.weight));
+          auto const nd = static_cast<cost_t>(d + sc.weight);
+          if (nd > P_max) continue;        // prune by P_max
+          relax(sc.target, nd);
         }
       }
     }

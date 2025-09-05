@@ -3,8 +3,12 @@
 #include <limits>
 #include <numeric>
 #include <random>
+#include <unordered_map>
+#include <queue>
 
 #include "utl/verify.h"
+
+#include "fmt/core.h"
 
 #include "osr/elevation_storage.h"
 #include "osr/location.h"
@@ -37,6 +41,13 @@ struct bidirectional_car_dijkstra {
     node_idx_t target;    // destination node
     cost_t weight;        // shortcut cost
     node_idx_t middle;    // bypassed node (for reconstruction)
+  };
+  
+  struct edge_info {
+    node_idx_t from;
+    node_idx_t to;
+    cost_t cost;
+    bool is_shortcut;
   };
 
   void clear_mp() {
@@ -235,13 +246,13 @@ struct bidirectional_car_dijkstra {
           }
           
           // CH level filtering: only relax edges to higher-level nodes
-          /*if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
+          if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
             if constexpr (kDebug) {
               std::cout << " -> FILTERED (level " << get_ch_level(neighbor.get_key()) 
                         << " <= " << get_ch_level(curr.get_key()) << ")\n";
             }
             return;
-          }*/
+          }
           
           auto const total = curr_cost + cost;
           if (total >= max) {
@@ -277,13 +288,13 @@ struct bidirectional_car_dijkstra {
     if (shortcuts_it != shortcuts_.end()) {
       for (auto const& sc : shortcuts_it->second) {
         // Apply CH level filtering to shortcuts too
-        /*if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
+        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
           if constexpr (kDebug) {
             std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
                       << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
           }
           continue;
-        }*/
+        }
         
         auto const total = curr_cost + sc.weight;
         if (total >= max) {
@@ -450,6 +461,285 @@ struct bidirectional_car_dijkstra {
   void clear_shortcuts() {
     clear_global_shortcuts();
   }
+  
+  // Discover all incoming edges to node u from nodes with level > level(u)
+  std::vector<edge_info> get_incoming_edges(ways const& w, node_idx_t u) const {
+    std::vector<edge_info> incoming;
+    auto const u_level = get_ch_level(u);
+    
+    // Check original graph edges
+    car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
+      car::adjacent<direction::kBackward, false>(
+          *w.r_, n, nullptr, nullptr, nullptr,
+          [&](node const pred, std::uint32_t const cost, distance_t,
+              way_idx_t const, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const) {
+            auto const pred_level = get_ch_level(pred.n_);
+            if (pred_level > u_level) {
+              incoming.push_back({pred.n_, u, static_cast<cost_t>(cost), false});
+            }
+          });
+    });
+    
+    // Check shortcuts pointing to u
+    for (auto const& [from_node, shortcut_list] : shortcuts_) {
+      auto const from_level = get_ch_level(from_node);
+      if (from_level > u_level) {
+        for (auto const& sc : shortcut_list) {
+          if (sc.target == u) {
+            incoming.push_back({from_node, u, sc.weight, true});
+          }
+        }
+      }
+    }
+    
+    return incoming;
+  }
+  
+  // Discover all outgoing edges from node u to nodes with level > level(u)
+  std::vector<edge_info> get_outgoing_edges(ways const& w, node_idx_t u) const {
+    std::vector<edge_info> outgoing;
+    auto const u_level = get_ch_level(u);
+    
+    // Check original graph edges
+    car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
+      car::adjacent<direction::kForward, false>(
+          *w.r_, n, nullptr, nullptr, nullptr,
+          [&](node const succ, std::uint32_t const cost, distance_t,
+              way_idx_t const, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const) {
+            auto const succ_level = get_ch_level(succ.n_);
+            if (succ_level > u_level) {
+              outgoing.push_back({u, succ.n_, static_cast<cost_t>(cost), false});
+            }
+          });
+    });
+    
+    // Check shortcuts from u
+    auto const shortcuts_it = shortcuts_.find(u);
+    if (shortcuts_it != shortcuts_.end()) {
+      for (auto const& sc : shortcuts_it->second) {
+        auto const target_level = get_ch_level(sc.target);
+        if (target_level > u_level) {
+          outgoing.push_back({u, sc.target, sc.weight, true});
+        }
+      }
+    }
+    
+    return outgoing;
+  }
+  
+  // Perform contraction of all nodes in ascending CH level order
+  void perform_contraction(ways const& w) {
+    auto const n_nodes = w.n_nodes();
+    
+    // Create list of nodes sorted by CH level
+    std::vector<node_idx_t> nodes_by_level;
+    nodes_by_level.reserve(n_nodes);
+    for (node_idx_t::value_t i = 0; i < n_nodes; ++i) {
+      nodes_by_level.emplace_back(node_idx_t{i});
+    }
+    
+    // Sort by CH level (ascending)
+    std::sort(nodes_by_level.begin(), nodes_by_level.end(),
+              [this](node_idx_t a, node_idx_t b) {
+                return get_ch_level(a) < get_ch_level(b);
+              });
+    
+    // Contract nodes in level order
+    std::size_t shortcuts_added = 0;
+    std::size_t nodes_contracted = 0;
+    constexpr auto const kMaxNodesToContract = 800U;
+    
+    for (auto const u : nodes_by_level) {
+      if (nodes_contracted >= kMaxNodesToContract) {
+        fmt::println("Stopping contraction after {} nodes", kMaxNodesToContract);
+        break;
+      }
+      
+      auto const node_shortcuts = contract_node(w, u);
+      shortcuts_added += node_shortcuts;
+      ++nodes_contracted;
+      fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
+                   u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
+    }
+    
+    fmt::println("Contraction complete: {} nodes contracted, {} shortcuts added", nodes_contracted, shortcuts_added);
+  }
+  
+  // Contract a single node u
+  std::size_t contract_node(ways const& w, node_idx_t u) {
+    auto const incoming = get_incoming_edges(w, u);
+    auto const outgoing = get_outgoing_edges(w, u);
+    
+    std::size_t shortcuts_added = 0;
+    auto const u_level = get_ch_level(u);
+    
+    // For each incoming edge (v, u) and outgoing edge (u, w)
+    for (auto const& in_edge : incoming) {
+      for (auto const& out_edge : outgoing) {
+        auto const v = in_edge.from;
+        auto const target = out_edge.to;
+        
+        // Skip self-loops
+        if (v == target) {
+          continue;
+        }
+        
+        auto const shortcut_cost = in_edge.cost + out_edge.cost;
+        
+        // Check for overflow
+        if (shortcut_cost > kInfeasible) {
+          continue;
+        }
+        
+        // Perform witness search from v to target
+        auto const witness_cost = witness_search(w, v, target, u_level, shortcut_cost);
+        
+        // Only add shortcut if no cheaper witness path exists
+        if (witness_cost >= shortcut_cost) {
+          add_global_shortcut(v, target, static_cast<cost_t>(shortcut_cost), u);
+          ++shortcuts_added;
+        } else {
+          // fmt::println("Witness found: {} -> {} via remaining graph has cost {}, shortcut would be {}", 
+          //              v.v_, target.v_, witness_cost, shortcut_cost);
+        }
+      }
+    }
+    
+    return shortcuts_added;
+  }
+  
+  // Witness search: local Dijkstra from start to target on remaining graph
+  // Returns the cost of the cheapest path found, or kInfeasible if no path exists
+  cost_t witness_search(ways const& w, node_idx_t start, node_idx_t target, 
+                        std::uint32_t contracted_level, cost_t distance_bound) const {
+    using witness_label = std::pair<cost_t, node_idx_t>;
+    std::priority_queue<witness_label, std::vector<witness_label>, std::greater<witness_label>> pq;
+    std::unordered_map<node_idx_t, cost_t> distances;
+    
+    pq.emplace(0U, start);
+    distances[start] = 0U;
+    
+    while (!pq.empty()) {
+      auto const [current_cost, current_node] = pq.top();
+      pq.pop();
+      
+      // Found target
+      if (current_node == target) {
+        return current_cost;
+      }
+      
+      // Exceeded distance bound - terminate search
+      if (current_cost >= distance_bound) {
+        break;
+      }
+      
+      // Skip if we've found a better path to this node
+      auto const dist_it = distances.find(current_node);
+      if (dist_it != distances.end() && current_cost > dist_it->second) {
+        continue;
+      }
+      
+      // Explore neighbors on remaining graph
+      explore_remaining_graph(w, current_node, contracted_level, current_cost,
+                              distance_bound, pq, distances);
+    }
+    
+    return kInfeasible; // No witness path found
+  }
+  
+  // Explore neighbors on the remaining graph (level > contracted_level, excluding contracted node)
+  void explore_remaining_graph(ways const& w, node_idx_t current, std::uint32_t contracted_level,
+                               cost_t current_cost, cost_t distance_bound,
+                               std::priority_queue<std::pair<cost_t, node_idx_t>, 
+                                                   std::vector<std::pair<cost_t, node_idx_t>>, 
+                                                   std::greater<std::pair<cost_t, node_idx_t>>>& pq,
+                               std::unordered_map<node_idx_t, cost_t>& distances) const {
+    
+    // Explore original graph edges
+    car::resolve_all(*w.r_, current, level_t{}, [&](node const n) {
+      car::adjacent<direction::kForward, false>(
+          *w.r_, n, nullptr, nullptr, nullptr,
+          [&](node const succ, std::uint32_t const cost, distance_t,
+              way_idx_t const, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const) {
+            auto const succ_level = get_ch_level(succ.n_);
+            
+            // Only consider nodes with higher level (not yet contracted)
+            if (succ_level <= contracted_level) {
+              return;
+            }
+            
+            auto const new_cost = current_cost + cost;
+            if (new_cost >= distance_bound) {
+              return;
+            }
+            
+            auto const dist_it = distances.find(succ.n_);
+            if (dist_it == distances.end() || new_cost < dist_it->second) {
+              distances[succ.n_] = static_cast<cost_t>(new_cost);
+              pq.emplace(static_cast<cost_t>(new_cost), succ.n_);
+            }
+          });
+    });
+    
+    // Explore existing shortcuts
+    auto const shortcuts_it = shortcuts_.find(current);
+    if (shortcuts_it != shortcuts_.end()) {
+      for (auto const& sc : shortcuts_it->second) {
+        auto const target_level = get_ch_level(sc.target);
+        
+        // Only consider targets with higher level (not yet contracted)
+        if (target_level <= contracted_level) {
+          continue;
+        }
+        
+        auto const new_cost = current_cost + sc.weight;
+        if (new_cost >= distance_bound) {
+          continue;
+        }
+        
+        auto const dist_it = distances.find(sc.target);
+        if (dist_it == distances.end() || new_cost < dist_it->second) {
+          distances[sc.target] = new_cost;
+          pq.emplace(new_cost, sc.target);
+        }
+      }
+    }
+  }
+  
+  // Unpack a path by recursively expanding shortcuts
+  std::vector<node_idx_t> unpack_path(node_idx_t from, node_idx_t to) const {
+    std::vector<node_idx_t> path;
+    unpack_path_recursive(from, to, path);
+    return path;
+  }
+  
+private:
+  // Recursive helper for path unpacking
+  void unpack_path_recursive(node_idx_t from, node_idx_t to, std::vector<node_idx_t>& path) const {
+    // Check if there's a shortcut from 'from' to 'to'
+    auto const shortcuts_it = shortcuts_.find(from);
+    if (shortcuts_it != shortcuts_.end()) {
+      for (auto const& sc : shortcuts_it->second) {
+        if (sc.target == to && sc.middle != node_idx_t::invalid()) {
+          // Found shortcut via middle node - unpack recursively
+          unpack_path_recursive(from, sc.middle, path);
+          unpack_path_recursive(sc.middle, to, path);
+          return;
+        }
+      }
+    }
+    
+    // No shortcut found - this is an original edge
+    if (path.empty() || path.back() != from) {
+      path.push_back(from);
+    }
+    path.push_back(to);
+  }
+  
+public:
 };
 
 // Static member definition

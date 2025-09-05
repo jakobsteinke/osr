@@ -64,7 +64,7 @@ void run(ways const& w,
   }();
   
   // Add direct shortcuts with cost 1 for testing
-  for (auto const& from_to : from_tos) {
+  /*for (auto const& from_to : from_tos) {
     osr::bidirectional_car_dijkstra::add_global_shortcut(
         from_to.first, from_to.second, 1U, osr::node_idx_t::invalid());
   }
@@ -76,7 +76,7 @@ void run(ways const& w,
   for (auto const& from_to : from_tos) {
     shortcut_count += osr::bidirectional_car_dijkstra::get_global_shortcut_count(from_to.first);
   }
-  fmt::println("Total shortcuts stored: {}", shortcut_count);
+  fmt::println("Total shortcuts stored: {}", shortcut_count);*/
 
   auto n_congruent = std::atomic<unsigned>{0U};
   auto n_empty_matches = std::atomic<unsigned>{0U};
@@ -160,9 +160,9 @@ void run(ways const& w,
       ++n_congruent;
       // Print results when both algorithms found the same solution
       if (reference && experiment && !from_matches.empty() && !to_matches.empty()) {
-        fmt::println("MATCH: {} --> {} | cost: {} | dist: {:.2f}",
+        fmt::println("MATCH: {} --> {} | dijkstra: {} | ch: {} | dist: {:.2f}",
                      w.node_to_osm_[from_node], w.node_to_osm_[to_node],
-                     experiment->cost_, experiment->dist_);
+                     reference->cost_, experiment->cost_, experiment->dist_);
       }
     }
 
@@ -203,7 +203,7 @@ void run(ways const& w,
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
-  auto const num_samples = 30U;  // Reduced for level filtering test
+  auto const num_samples = 3000U;  // Reduced for level filtering test
   auto const max_cost = 3600U;
 
   if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
@@ -242,6 +242,17 @@ TEST(dijkstra_astarbidir, monaco) {
     EXPECT_TRUE(seen_levels.insert(level).second) << "Duplicate level " << level;
   }
   fmt::println("CH level assignment verified: {} unique levels assigned", seen_levels.size());
+  
+  // Perform contraction
+  fmt::println("Starting contraction...");
+  ch_dijkstra.perform_contraction(w);
+  
+  // Print some statistics
+  auto total_shortcuts = 0U;
+  for (auto i = 0U; i < total_nodes; ++i) {
+    total_shortcuts += ch_dijkstra.get_shortcut_count(osr::node_idx_t{i});
+  }
+  fmt::println("Total shortcuts in graph: {}", total_shortcuts);
   
   run(w, l, num_samples, max_cost);
 }

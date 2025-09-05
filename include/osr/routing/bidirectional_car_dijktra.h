@@ -276,10 +276,15 @@ struct bidirectional_car_dijkstra {
           }
           
           // CH level filtering: only relax edges to higher-level nodes
-          if (get_ch_level(neighbor.get_key()) <= get_ch_level(curr.get_key())) {
+          auto const neighbor_level = get_ch_level(neighbor.get_key());
+          auto const curr_level = get_ch_level(curr.get_key());
+          fmt::println("Level check: neighbor {} (level {}) vs curr {} (level {})", 
+                       neighbor.get_key().v_, neighbor_level, curr.get_key().v_, curr_level);
+          
+          if (neighbor_level <= curr_level) {
             if constexpr (kDebug) {
-              std::cout << " -> FILTERED (level " << get_ch_level(neighbor.get_key()) 
-                        << " <= " << get_ch_level(curr.get_key()) << ")\n";
+              std::cout << " -> FILTERED (level " << neighbor_level 
+                        << " <= " << curr_level << ")\n";
             }
             return;
           }

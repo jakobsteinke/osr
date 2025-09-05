@@ -464,6 +464,7 @@ struct bidirectional_car_dijkstra {
                                   node_idx_t middle, turn_anchor first_real_edge, 
                                   turn_anchor last_real_edge) {
     shortcuts_[from].emplace_back(shortcut{to, weight, middle, first_real_edge, last_real_edge});
+    // shortcuts_[from].emplace_back(shortcut{to, 1, middle, first_real_edge, last_real_edge});
   }
   
   static std::size_t get_global_shortcut_count(node_idx_t from) {
@@ -677,8 +678,8 @@ struct bidirectional_car_dijkstra {
       auto const node_shortcuts = contract_node(w, u);
       shortcuts_added += node_shortcuts;
       ++nodes_contracted;
-      // fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
-      //              u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
+      fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
+                   u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
     }
     
     fmt::println("Contraction complete: {} nodes contracted, {} shortcuts added", nodes_contracted, shortcuts_added);
@@ -691,7 +692,7 @@ struct bidirectional_car_dijkstra {
     
     std::size_t shortcuts_added = 0;
     auto const u_level = get_ch_level(u);
-    constexpr auto const kMaxShortcutsPerNode = 10U;
+    constexpr auto const kMaxShortcutsPerNode = 50U;
     
     // For each incoming edge (v, u) and outgoing edge (u, w)
     for (auto const& in_edge : incoming) {

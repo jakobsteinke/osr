@@ -158,6 +158,9 @@ struct bidirectional_car_dijkstra {
         meet_point_2_ = meetpoint2;
         best_cost_ = static_cast<cost_t>(tentative);
 
+        fmt::println("MEETPOINT FOUND: {} <-> {} with total cost {}", 
+                     meetpoint1.get_node().v_, meetpoint2.get_node().v_, best_cost_);
+
         if constexpr (kDebug) {
           std::cout << " with cost " << best_cost_ << " -> ACCEPTED\n";
         }
@@ -276,8 +279,10 @@ struct bidirectional_car_dijkstra {
           if (total >= max) {
             if (SearchDir == direction::kForward) {
               max_reached_1_ = true;
+              fmt::println("FORWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             } else {
               max_reached_2_ = true;
+              fmt::println("BACKWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             }
             return;
           }
@@ -318,8 +323,10 @@ struct bidirectional_car_dijkstra {
         if (total >= max) {
           if (SearchDir == direction::kForward) {
             max_reached_1_ = true;
+            fmt::println("FORWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
           } else {
             max_reached_2_ = true;
+            fmt::println("BACKWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
           }
           continue;
         }
@@ -353,10 +360,8 @@ struct bidirectional_car_dijkstra {
       auto const min_r = pq2_.buckets_[pq2_.get_next_bucket()].back().cost();
       // Terminate only if BOTH searches have costs exceeding the best meetpoint cost
       if (min_f > best_cost_ && min_r > best_cost_) {
-        if (kDebug) {
-          std::cout << "μ-termination: both searches exceeded best cost " 
-                    << min_f << " " << min_r << " > " << best_cost_ << std::endl;
-        }
+        fmt::println("μ-TERMINATION: forward {} + backward {} > best {}", 
+                     min_f, min_r, best_cost_);
         return false;
       }
     }
@@ -856,12 +861,16 @@ struct bidirectional_car_dijkstra {
 private:
   // Recursive helper for path unpacking
   void unpack_path_recursive(node_idx_t from, node_idx_t to, std::vector<node_idx_t>& path) const {
+    fmt::println("Unpacking path segment: {} -> {}", from.v_, to.v_);
+    
     // Check if there's a shortcut from 'from' to 'to'
     auto const shortcuts_it = shortcuts_.find(from);
     if (shortcuts_it != shortcuts_.end()) {
       for (auto const& sc : shortcuts_it->second) {
         if (sc.target == to && sc.middle != node_idx_t::invalid()) {
           // Found shortcut via middle node - unpack recursively
+          fmt::println("  Shortcut found: {} -> {} via middle {}", 
+                       from.v_, to.v_, sc.middle.v_);
           unpack_path_recursive(from, sc.middle, path);
           unpack_path_recursive(sc.middle, to, path);
           return;
@@ -869,7 +878,8 @@ private:
       }
     }
     
-    // No shortcut found - this is an original edge
+    // No shortcut found - this should be a direct edge in the original graph
+    fmt::println("  Direct edge: {} -> {}", from.v_, to.v_);
     if (path.empty() || path.back() != from) {
       path.push_back(from);
     }

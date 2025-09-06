@@ -257,6 +257,63 @@ TEST(dijkstra_astarbidir, monaco) {
   run(w, l, num_samples, max_cost);
 }
 
+TEST(dijkstra_astarbidir, tokelau) {
+  auto const raw_data = "test/tokelau-250905.osm.pbf";
+  auto const data_dir = "test/tokelau";
+  auto const num_samples = 3000U;  // Reduced for level filtering test
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Clear any existing shortcuts
+  osr::bidirectional_car_dijkstra::clear_global_shortcuts();
+
+  // Test CH level assignment
+  auto ch_dijkstra = osr::bidirectional_car_dijkstra{};
+  ch_dijkstra.assign_ch_levels(w);
+  
+  // Verify level assignment
+  auto const total_nodes = w.n_nodes();
+  fmt::println("Total nodes: {}", total_nodes);
+  
+  // Check some sample nodes have valid levels
+  for (auto i = 0U; i < std::min(10U, total_nodes); ++i) {
+    auto const node = osr::node_idx_t{i};
+    auto const level = ch_dijkstra.get_ch_level(node);
+    fmt::println("Node {} has CH level {}", i, level);
+  }
+  
+  // Verify all levels are unique and in range [1, n]
+  std::set<std::uint32_t> seen_levels;
+  for (auto i = 0U; i < total_nodes; ++i) {
+    auto const node = osr::node_idx_t{i};
+    auto const level = ch_dijkstra.get_ch_level(node);
+    EXPECT_GE(level, 1U);
+    EXPECT_LE(level, total_nodes);
+    EXPECT_TRUE(seen_levels.insert(level).second) << "Duplicate level " << level;
+  }
+  fmt::println("CH level assignment verified: {} unique levels assigned", seen_levels.size());
+  
+  // Perform contraction
+  fmt::println("Starting contraction...");
+  ch_dijkstra.perform_contraction(w);
+  
+  // Print some statistics
+  auto total_shortcuts = 0U;
+  for (auto i = 0U; i < total_nodes; ++i) {
+    total_shortcuts += ch_dijkstra.get_shortcut_count(osr::node_idx_t{i});
+  }
+  fmt::println("Total shortcuts in graph: {}", total_shortcuts);
+  
+  run(w, l, num_samples, max_cost);
+}
+
 TEST(dijkstra_astarbidir, hamburg) {
   auto const raw_data = "test/hamburg.osm.pbf";
   auto const data_dir = "test/hamburg";

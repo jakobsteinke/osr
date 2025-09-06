@@ -27,7 +27,8 @@ For each node `u` in ascending level order contract the node u:
 
 ### Shortcut creation details
 For the contraction of a node u, we face a many-to-many shortest path problem from source nodes v ∈ S := {v | (v, u) ∈ E and level(v) > level(u)} incident to incoming edges of u to all target nodes w ∈ T := {w | (u, w) ∈ E  and level(w) > level(u)} incident to outgoing edges of u. For such a pair v != w, we want 
-to decide whether `<v, u, w>`, if it is a shortest v-w-path, is the only shortest v-w-path. A simple way to implement this is to perform for each source node v a forward shortest-path search starting at v in the current remaining graph until all target nodes T \ {v} are settled. The reamining graph is the graph containing only nodes with level >= Level(u) and all edges between these nodes, **including shortcuts added in previous contractions**. Such a limited search is called a local search. For a given pair (v, w) we add a shortcut edge if and only if the shortest path found by this local search contains u. If there are already edges (v, w) and we add the shortcut (v, w) we keep the original edges (v, w), thus the graph is not simple. 
+to decide whether `<v, u, w>`, if it is a shortest v-w-path, is the only shortest v-w-path. A simple way to implement this is to perform for each source node v a forward shortest-path search starting at v in the current remaining graph until all target nodes T \ {v} are settled. The reamining graph is the graph containing only nodes with level > Level(u) and all edges between these nodes, **including shortcuts added in previous contractions and excluding u itself**. Such a limited search is called a local search. For a given pair (v, w) we add a shortcut edge if and only if the shortest path found by this local search is more expensive the the shortcut cost = cost(v, u) + cost(u, w). If there are already edges (v, w) and we add the shortcut (v, w) we keep the original edges (v, w), thus the graph is not simple. Important: before we add a shortcut (v, w) representing (v, u), (u, w) we have to check if we can legally take the edge (u, w) when coming from (v, u). Below you can see how this can be done. Be stop the local search when all targets v are settled or we can additionally stop the search from a node x when it has reached distance w(v, u) + max {w(u, w) | (u, w) ∈ E \ {(u, v)}}.
+
 
 ## OSR specific turn restrictions: 
 Take a look at this working implementation of a normal bidirectional Dijktra in OSR for the car profile (no contraction hierachies):
@@ -442,21 +443,31 @@ Turn restrictions tells us: based on the way_pos_t we used to get into our curre
 ## Contraction Pseudo Code
 ```
 contract(u):
-  S = { v | (v,u) in E and level(v) > level(u) }
-  T = { w | (u,w) in E and level(w) > level(u) }
+contract(u):
+S = { v | (v,u) ∈ E and level(v) > level(u) } // incoming neighbors above u
+T = { w | (u,w) ∈ E and level(w) > level(u) } // outgoing neighbors above u
 
-  for v in S:
-    dist = local_dijkstra_from_v(level_min = level(u))  // nodes with level >= level(u)
-      // expansions:
-      //  - normal edges with is_restricted checks
-      //  - existing shortcuts with first-step is_restricted checks
+for v in S:
+// Run local Dijkstra in the "remaining graph":
+// - only nodes with level ≥ level(u)
+// - include shortcuts added in earlier contractions
+// - exclude u itself
+// Stop when:
+// - all targets in T \ {v} are settled, OR
+// - distance(x) > cost(v,u) + max{ cost(u,w) | (u,w) ∈ E \ {(u,v)} }
+dist = local_dijkstra_from_v(level_min = level(u), exclude=u)
+// Expansion rules (same as query -> see below)
 
-    for w in T, w != v:
-      if shortest v->w path includes u:
-        add_shortcut(v, w, via=u,
-          first_step_at_v = (to_way_pos_at_v, dir_first),
-          last_step_at_w  = (from_way_pos_at_w, dir_last),
-          cost = cost(v->u)+cost(u->w), distance=...)
+for w in T, w != v:
+  // Only add shortcut if the cheapest v→w path found is *more expensive*
+  // than cost(v,u) + cost(u,w)
+  if dist[w] > cost(v,u) + cost(u,w):
+    // Check legality of taking (u,w) when arriving via (v,u)
+    if !is_restricted<SearchDir>(u, to_way_pos_from_v, from_way_pos_to_w):
+      add_shortcut(v, w, via=u,
+        first_step_at_v = (to_way_pos_at_v, dir_first),
+        last_step_at_w  = (from_way_pos_at_w, dir_last),
+        cost     = cost(v,u) + cost(u,w)
 ```
 
 ## Query expansion from a settled state Pseudo Code (used in Witness Search and in Query)

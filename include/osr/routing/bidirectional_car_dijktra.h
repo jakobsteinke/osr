@@ -733,15 +733,14 @@ struct bidirectional_car_dijkstra {
                        node_idx_t u, std::uint32_t u_level,
                        way_pos_t start_way_pos, direction start_dir) const {
     
-    // We run a Dijkstra from v to target on the remaining graph (nodes with level >= u_level)
-    // INCLUDING node u. We check if the shortest path goes through u.
+    // We run a Dijkstra from v to target on the remaining graph (nodes with level > u_level)
+    // excluding node u. Any path found doesn't go through u.
     
     struct State {
       node_idx_t node;
       way_pos_t way_pos;
       direction dir;
       cost_t cost;
-      node_idx_t pred; // predecessor node to track path
       
       bool operator>(State const& other) const { return cost > other.cost; }
     };
@@ -769,14 +768,13 @@ struct bidirectional_car_dijkstra {
       }
     };
     
-    std::unordered_map<StateKey, std::pair<cost_t, node_idx_t>, StateKeyHash> dist;
+    std::unordered_map<StateKey, cost_t, StateKeyHash> dist;
     
     // Start from all possible states at v with the given way_pos and direction
-    pq.push({v, start_way_pos, start_dir, 0U, node_idx_t::invalid()});
-    dist[{v, start_way_pos, start_dir}] = {0U, node_idx_t::invalid()};
+    pq.push({v, start_way_pos, start_dir, 0U});
+    dist[{v, start_way_pos, start_dir}] = 0U;
     
-    cost_t best_cost_through_u = kInfeasible;
-    cost_t best_cost_not_through_u = kInfeasible;
+    // Since we exclude u from the search, any path found doesn't go through u
     
     while (!pq.empty()) {
       auto const curr = pq.top();
@@ -784,45 +782,14 @@ struct bidirectional_car_dijkstra {
       
       // Check if we've reached target
       if (curr.node == target) {
-        // Check if path goes through u by backtracking
-        bool goes_through_u = false;
-        auto check_node = curr.node;
-        auto check_key = StateKey{curr.node, curr.way_pos, curr.dir};
-        
-        while (check_node != v) {
-          if (check_node == u) {
-            goes_through_u = true;
-            break;
-          }
-          auto it = dist.find(check_key);
-          if (it == dist.end() || it->second.second == node_idx_t::invalid()) {
-            break;
-          }
-          check_node = it->second.second;
-          // We'd need to track the full state to properly backtrack, simplifying for now
-          break; // Simplified - just check if we directly visited u
-        }
-        
-        // For simplicity, check if we visited u at all
-        goes_through_u = (curr.node == u) || (curr.pred == u);
-        
-        if (goes_through_u) {
-          best_cost_through_u = std::min(best_cost_through_u, curr.cost);
-        } else {
-          best_cost_not_through_u = std::min(best_cost_not_through_u, curr.cost);
-        }
-        
-        // If we found a path not through u, we can return it
-        if (best_cost_not_through_u != kInfeasible) {
-          return best_cost_not_through_u;
-        }
-        continue;
+        // Since we excluded u from search, this path doesn't go through u
+        return curr.cost;
       }
       
       // Skip if not optimal
       auto const state_key = StateKey{curr.node, curr.way_pos, curr.dir};
       auto const dist_it = dist.find(state_key);
-      if (dist_it != dist.end() && curr.cost > dist_it->second.first) {
+      if (dist_it != dist.end() && curr.cost > dist_it->second) {
         continue;
       }
       
@@ -838,8 +805,8 @@ struct bidirectional_car_dijkstra {
                 way_idx_t const, std::uint16_t, std::uint16_t,
                 elevation_storage::elevation const, bool const) {
               
-              // Only consider nodes in remaining graph (level >= u_level)
-              if (get_ch_level(succ.n_) < u_level) {
+              // Only consider nodes in remaining graph (level > u_level, excluding u)
+              if (get_ch_level(succ.n_) <= u_level) {
                 return;
               }
               
@@ -847,9 +814,9 @@ struct bidirectional_car_dijkstra {
               auto const new_key = StateKey{succ.n_, succ.way_, succ.dir_};
               
               auto const existing = dist.find(new_key);
-              if (existing == dist.end() || new_cost < existing->second.first) {
-                dist[new_key] = {new_cost, curr.node};
-                pq.push({succ.n_, succ.way_, succ.dir_, static_cast<cost_t>(new_cost), curr.node});
+              if (existing == dist.end() || new_cost < existing->second) {
+                dist[new_key] = new_cost;
+                pq.push({succ.n_, succ.way_, succ.dir_, static_cast<cost_t>(new_cost)});
               }
             });
       });
@@ -858,8 +825,8 @@ struct bidirectional_car_dijkstra {
       auto const shortcuts_it = shortcuts_.find(curr.node);
       if (shortcuts_it != shortcuts_.end()) {
         for (auto const& sc : shortcuts_it->second) {
-          // Only to nodes in remaining graph
-          if (get_ch_level(sc.target) < u_level) {
+          // Only to nodes in remaining graph (level > u_level, excluding u)
+          if (get_ch_level(sc.target) <= u_level) {
             continue;
           }
           
@@ -872,16 +839,16 @@ struct bidirectional_car_dijkstra {
           auto const new_key = StateKey{sc.target, sc.last_way_pos, sc.last_dir};
           
           auto const existing = dist.find(new_key);
-          if (existing == dist.end() || new_cost < existing->second.first) {
-            dist[new_key] = {new_cost, curr.node};
-            pq.push({sc.target, sc.last_way_pos, sc.last_dir, static_cast<cost_t>(new_cost), curr.node});
+          if (existing == dist.end() || new_cost < existing->second) {
+            dist[new_key] = new_cost;
+            pq.push({sc.target, sc.last_way_pos, sc.last_dir, static_cast<cost_t>(new_cost)});
           }
         }
       }
     }
     
-    // Return cost of best path not through u (or kInfeasible if none exists)
-    return best_cost_not_through_u;
+    // No path found to target in remaining graph
+    return kInfeasible;
   }
   
   // Unpack a path by recursively expanding shortcuts

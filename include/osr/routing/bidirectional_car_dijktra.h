@@ -655,14 +655,8 @@ struct bidirectional_car_dijkstra {
     // Contract nodes in level order
     std::size_t shortcuts_added = 0;
     std::size_t nodes_contracted = 0;
-    constexpr auto const kMaxNodesToContract = 800U;
     
     for (auto const u : nodes_by_level) {
-      /*if (nodes_contracted >= kMaxNodesToContract) {
-        fmt::println("Stopping contraction after {} nodes", kMaxNodesToContract);
-        break;
-      }*/
-      
       auto const node_shortcuts = contract_node(w, u);
       shortcuts_added += node_shortcuts;
       ++nodes_contracted;

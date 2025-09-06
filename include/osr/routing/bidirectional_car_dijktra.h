@@ -340,6 +340,14 @@ struct bidirectional_car_dijkstra {
           continue;
         }
         
+        // Check turn restriction: can we go from curr.way_ to sc.first_way_pos?
+        if (r.is_restricted<SearchDir>(curr.n_, curr.way_, sc.first_way_pos)) {
+          if constexpr (kDebug) {
+            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> BLOCKED (turn restriction)\n";
+          }
+          continue;
+        }
+        
         auto const total = curr_cost + sc.weight;
         if (total >= max) {
           if (SearchDir == direction::kForward) {
@@ -352,8 +360,8 @@ struct bidirectional_car_dijkstra {
           continue;
         }
         
-        // Create a node for the shortcut target (use way=0, dir=forward as placeholder)
-        auto const target_node = node{sc.target, 0U, direction::kForward};
+        // Create a node for the shortcut target with correct arrival state
+        auto const target_node = node{sc.target, sc.last_way_pos, sc.last_dir};
         if (total < max && costs[target_node.get_key()].update(
                 l, target_node, static_cast<cost_t>(total), curr)) {
           
@@ -849,6 +857,20 @@ struct bidirectional_car_dijkstra {
   std::vector<node_idx_t> unpack_path(node_idx_t from, node_idx_t to) const {
     std::vector<node_idx_t> path;
     unpack_path_recursive(from, to, path);
+    
+    // Log first 3 nodes for debugging
+    fmt::print("Unpacked path ({} nodes): ", path.size());
+    for (auto i = 0U; i < std::min(3U, static_cast<unsigned>(path.size())); ++i) {
+      fmt::print("{}", path[i].v_);
+      if (i < std::min(3U, static_cast<unsigned>(path.size())) - 1) {
+        fmt::print(" -> ");
+      }
+    }
+    if (path.size() > 3) {
+      fmt::print(" -> ... -> {}", path.back().v_);
+    }
+    fmt::println("");
+    
     return path;
   }
   

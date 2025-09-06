@@ -1,3 +1,5 @@
+// [UNCHANGED FROM YOUR LAST MESSAGE EXCEPT: no track() during relax]
+// file: include/osr/routing/bidirectional_car_dijktra.h
 #pragma once
 
 #include <limits>
@@ -5,6 +7,7 @@
 #include <random>
 #include <unordered_map>
 #include <queue>
+#include <algorithm>
 
 #include "utl/verify.h"
 
@@ -32,57 +35,162 @@ struct bidirectional_car_dijkstra {
   using cost_map = ankerl::unordered_dense::map<key, entry, hash>;
 
   constexpr static auto const kDebug = false;
+  static constexpr auto const kUturnPenalty = cost_t{120U};
 
   struct get_bucket {
     cost_t operator()(label const& l) { return l.cost(); }
   };
-  
-  // Simplified shortcut structure according to CLAUDE.md specifications
-  
+
+  struct shortcut_anchor {
+    way_idx_t way;
+    way_pos_t way_pos;
+    direction dir;
+    std::uint16_t from;
+    std::uint16_t to;
+    distance_t dist;
+  };
+
   struct shortcut {
-    node_idx_t target;       // destination node
-    cost_t weight;           // shortcut cost
-    node_idx_t middle;       // bypassed node (for reconstruction)
-    
-    // First real edge: how to leave the source node
-    way_pos_t first_way_pos; // way position at source to take
-    direction first_dir;     // direction to travel on first edge
-    
-    // Last real edge: how we arrive at target node  
-    way_pos_t last_way_pos;  // way position we arrive at target
-    direction last_dir;      // direction we're traveling when arriving
-    
-    node_idx_t from;         // source node (for reverse index)
-    
-    // Constructor without from (for forward index)
-    shortcut(node_idx_t t, cost_t w, node_idx_t m, 
-             way_pos_t first_wp, direction first_d,
-             way_pos_t last_wp, direction last_d)
-      : target(t), weight(w), middle(m), 
-        first_way_pos(first_wp), first_dir(first_d),
-        last_way_pos(last_wp), last_dir(last_d),
-        from(node_idx_t::invalid()) {}
-      
-    // Constructor with from (for reverse index)
-    shortcut(node_idx_t f, node_idx_t t, cost_t w, node_idx_t m,
-             way_pos_t first_wp, direction first_d,
-             way_pos_t last_wp, direction last_d)
+    node_idx_t target;
+    cost_t     weight;
+    node_idx_t middle;
+    shortcut_anchor first;
+    shortcut_anchor last;
+    node_idx_t from;
+
+    shortcut(node_idx_t t, cost_t w, node_idx_t m,
+             shortcut_anchor first_a, shortcut_anchor last_a)
       : target(t), weight(w), middle(m),
-        first_way_pos(first_wp), first_dir(first_d),
-        last_way_pos(last_wp), last_dir(last_d),
+        first(first_a), last(last_a),
+        from(node_idx_t::invalid()) {}
+
+    shortcut(node_idx_t f, node_idx_t t, cost_t w, node_idx_t m,
+             shortcut_anchor first_a, shortcut_anchor last_a)
+      : target(t), weight(w), middle(m),
+        first(first_a), last(last_a),
         from(f) {}
   };
-  
+
   struct edge_info {
     node_idx_t from;
     node_idx_t to;
-    cost_t cost;
-    bool is_shortcut;
-    way_pos_t first_way_pos;  // for both edges and shortcuts
-    direction first_dir;      // direction of first edge
-    way_pos_t last_way_pos;   // where we arrive
-    direction last_dir;       // direction when arriving
+    cost_t     cost;
+    bool       is_shortcut;
+
+    way_pos_t  first_way_pos;
+    direction  first_dir;
+    way_idx_t  first_way;
+    std::uint16_t first_from, first_to;
+
+    way_pos_t  last_way_pos;
+    direction  last_dir;
+    way_idx_t  last_way;
+    std::uint16_t last_from, last_to;
   };
+
+  template <direction SearchDir, bool WithBlocked, typename Fn>
+  static void adjacent(ways::routing const& w,
+                       node const n,
+                       bitvec<node_idx_t> const* blocked,
+                       sharing_data const*,
+                       elevation_storage const*,
+                       Fn&& fn) {
+    // 1) Normal edges
+    auto way_pos = way_pos_t{0U};
+    for (auto const [way, i] :
+         utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
+      auto const expand = [&](direction const way_dir, std::uint16_t const from,
+                              std::uint16_t const to) {
+        auto const target_node = w.way_nodes_[way][to];
+        if constexpr (WithBlocked) {
+          if (blocked->test(target_node)) {
+            return;
+          }
+        }
+
+        auto const target_node_prop = w.node_properties_[target_node];
+        if (car::node_cost(target_node_prop) == kInfeasible) {
+          return;
+        }
+
+        auto const target_way_prop = w.way_properties_[way];
+        if (car::way_cost(target_way_prop, way_dir, 0U) == kInfeasible) {
+          return;
+        }
+
+        if (w.is_restricted<SearchDir>(n.n_, n.way_, way_pos)) {
+          return;
+        }
+
+        auto const is_u_turn = way_pos == n.way_ && way_dir == opposite(n.dir_);
+        auto const dist = w.way_node_dist_[way][std::min(from, to)];
+        auto const target =
+            node{target_node, w.get_way_pos(target_node, way, to), way_dir};
+        auto const cost = car::way_cost(target_way_prop, way_dir, dist) +
+                          car::node_cost(target_node_prop) +
+                          (is_u_turn ? kUturnPenalty : 0U);
+
+        fn(target, cost, dist, way, from, to, elevation_storage::elevation{},
+           /*track=*/false);
+      };
+
+      if (i != 0U) {
+        expand(flip<SearchDir>(direction::kBackward), i, i - 1);
+      }
+      if (i != w.way_nodes_[way].size() - 1U) {
+        expand(flip<SearchDir>(direction::kForward), i, i + 1);
+      }
+
+      ++way_pos;
+    }
+
+    // 2) CH Shortcuts
+    if constexpr (SearchDir == direction::kForward) {
+      if (auto it = shortcuts_.find(n.n_); it != shortcuts_.end()) {
+        for (auto const& sc : it->second) {
+          if constexpr (WithBlocked) {
+            if (blocked->test(sc.target)) continue;
+          }
+          if (w.is_restricted<SearchDir>(n.n_, n.way_, sc.first.way_pos)) continue;
+
+          bool const is_u_turn =
+              (n.way_ == sc.first.way_pos) && (sc.first.dir == opposite(n.dir_));
+
+          auto const neighbor = node{sc.target, sc.last.way_pos, sc.last.dir};
+          auto const edge_cost =
+              static_cast<std::uint32_t>(sc.weight + (is_u_turn ? kUturnPenalty : 0U));
+
+          fn(neighbor, edge_cost,
+             /*dist*/ sc.first.dist,
+             /*way*/ way_idx_t::invalid(),
+             /*from*/ 0, /*to*/ 0,
+             elevation_storage::elevation{}, /*track=*/false);
+        }
+      }
+    } else {
+      if (auto it = shortcuts_by_target_.find(n.n_); it != shortcuts_by_target_.end()) {
+        for (auto const& sc : it->second) {
+          if constexpr (WithBlocked) {
+            if (blocked->test(sc.from)) continue;
+          }
+          if (w.is_restricted<SearchDir>(n.n_, n.way_, sc.last.way_pos)) continue;
+
+          bool const is_u_turn =
+              (n.way_ == sc.last.way_pos) && (sc.last.dir == opposite(n.dir_));
+
+          auto const neighbor = node{sc.from, sc.first.way_pos, sc.first.dir};
+          auto const edge_cost =
+              static_cast<std::uint32_t>(sc.weight + (is_u_turn ? kUturnPenalty : 0U));
+
+          fn(neighbor, edge_cost,
+             /*dist*/ sc.last.dist,
+             /*way*/ way_idx_t::invalid(),
+             /*from*/ 0, /*to*/ 0,
+             elevation_storage::elevation{}, /*track=*/false);
+        }
+      }
+    }
+  }
 
   void clear_mp() {
     meet_point_1_ = node::invalid();
@@ -106,9 +214,9 @@ struct bidirectional_car_dijkstra {
     max_reached_2_ = false;
   }
 
-  void add(ways const& w,
+  void add(ways const&,
            label const l,
-           direction const dir,
+           direction const,
            cost_map& cost_map,
            dial<label, get_bucket>& d,
            sharing_data const*) {
@@ -174,7 +282,7 @@ struct bidirectional_car_dijkstra {
         meet_point_2_ = meetpoint2;
         best_cost_ = static_cast<cost_t>(tentative);
 
-        fmt::println("MEETPOINT FOUND: {} <-> {} with total cost {}", 
+        fmt::println("MEETPOINT FOUND: {} <-> {} with total cost {}",
                      meetpoint1.get_node().v_, meetpoint2.get_node().v_, best_cost_);
 
         if constexpr (kDebug) {
@@ -189,7 +297,7 @@ struct bidirectional_car_dijkstra {
         opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
     auto const opposite_candidate = opposite_cost_map->find(curr.get_key());
     auto const curr_cost = get_cost<SearchDir>(curr);
-    
+
     if (opposite_candidate != end(*opposite_cost_map)) {
       auto const other_cost = opposite_candidate->second.cost(curr);
       if (other_cost != kInfeasible) {
@@ -203,7 +311,7 @@ struct bidirectional_car_dijkstra {
         if (!pred.has_value()) {
           return;
         }
-        car::adjacent<opposite(SearchDir), WithBlocked>(
+        adjacent<opposite(SearchDir), WithBlocked>(
             r, curr, blocked, sharing, elevations,
             [&](node const neighbor, std::uint32_t const, distance_t,
                 way_idx_t const, std::uint16_t, std::uint16_t,
@@ -261,61 +369,50 @@ struct bidirectional_car_dijkstra {
     auto const l = pq.pop();
     auto const curr = l.get_node();
     auto const curr_cost = get_cost<SearchDir>(curr);
-    
+
     if (curr_cost < l.cost()) {
       return true;
     }
-    
+
     if constexpr (kDebug) {
       std::cout << "EXTRACT ";
       l.get_node().print(std::cout, w);
       std::cout << "\n";
     }
 
-    car::adjacent<SearchDir, WithBlocked>(
+    adjacent<SearchDir, WithBlocked>(
         r, curr, blocked, sharing, elevations,
         [&](node const neighbor, std::uint32_t const cost, distance_t,
-            way_idx_t const way, std::uint16_t, std::uint16_t,
-            elevation_storage::elevation const, bool const track) {
-          if constexpr (kDebug) {
-            std::cout << "  NEIGHBOR ";
-            neighbor.print(std::cout, w);
-          }
-          
-          // CH level filtering: only relax edges to higher-level nodes
+            way_idx_t const /*way*/,
+            std::uint16_t, std::uint16_t,
+            elevation_storage::elevation const, bool const /*track_from_adj*/) {
+
           auto const neighbor_level = get_ch_level(neighbor.get_key());
           auto const curr_level = get_ch_level(curr.get_key());
-          //fmt::println("Level check: neighbor {} (level {}) vs curr {} (level {})", 
-                       //neighbor.get_key().v_, neighbor_level, curr.get_key().v_, curr_level);
-          
           if (neighbor_level <= curr_level) {
             if constexpr (kDebug) {
-              std::cout << " -> FILTERED (level " << neighbor_level 
+              std::cout << " -> FILTERED (level " << neighbor_level
                         << " <= " << curr_level << ")\n";
             }
             return;
           }
-          
+
           auto const total = curr_cost + cost;
           if (total >= max) {
             if (SearchDir == direction::kForward) {
               max_reached_1_ = true;
-              //fmt::println("FORWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             } else {
               max_reached_2_ = true;
-              //fmt::println("BACKWARD search reached max cost {} at node {}", max, curr.get_key().v_);
             }
             return;
           }
+
           if (total < max &&
               costs[neighbor.get_key()].update(
                   l, neighbor, static_cast<cost_t>(total), curr)) {
 
-            auto next = label{neighbor, static_cast<cost_t>(total)};
-            next.track(l, r, way, neighbor.get_node(), track);
-            pq.push(std::move(next));
-
-            // Meetpoint checking is done after settling nodes
+            // DO NOT track() — costs only.
+            pq.push(label{neighbor, static_cast<cost_t>(total)});
 
             if constexpr (kDebug) {
               std::cout << " -> PUSH\n";
@@ -326,70 +423,14 @@ struct bidirectional_car_dijkstra {
             }
           }
         });
-    
-    // Process shortcuts from current node
-    auto const shortcuts_it = shortcuts_.find(curr.get_key());
-    if (shortcuts_it != shortcuts_.end()) {
-      for (auto const& sc : shortcuts_it->second) {
-        // Apply CH level filtering to shortcuts too
-        if (get_ch_level(sc.target) <= get_ch_level(curr.get_key())) {
-          if constexpr (kDebug) {
-            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> FILTERED (level " 
-                      << get_ch_level(sc.target) << " <= " << get_ch_level(curr.get_key()) << ")\n";
-          }
-          continue;
-        }
-        
-        // Check turn restriction: can we go from curr.way_ to sc.first_way_pos?
-        if (r.is_restricted<SearchDir>(curr.n_, curr.way_, sc.first_way_pos)) {
-          if constexpr (kDebug) {
-            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> BLOCKED (turn restriction)\n";
-          }
-          continue;
-        }
-        
-        auto const total = curr_cost + sc.weight;
-        if (total >= max) {
-          if (SearchDir == direction::kForward) {
-            max_reached_1_ = true;
-            //fmt::println("FORWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
-          } else {
-            max_reached_2_ = true;
-            //fmt::println("BACKWARD shortcut reached max cost {} from {} to {}", max, curr.get_key().v_, sc.target.v_);
-          }
-          continue;
-        }
-        
-        // Create a node for the shortcut target with correct arrival state
-        auto const target_node = node{sc.target, sc.last_way_pos, sc.last_dir};
-        if (total < max && costs[target_node.get_key()].update(
-                l, target_node, static_cast<cost_t>(total), curr)) {
-          
-          auto next = label{target_node, static_cast<cost_t>(total)};
-          // No tracking for shortcuts (no real way/node info)
-          pq.push(std::move(next));
-          
-          if constexpr (kDebug) {
-            std::cout << "  SHORTCUT to " << sc.target.v_ << " cost " << sc.weight 
-                      << " -> PUSHED\n";
-          }
-        } else {
-          if constexpr (kDebug) {
-            std::cout << "  SHORTCUT to " << sc.target.v_ << " -> DOMINATED\n";
-          }
-        }
-      }
-    }
 
     handle_end_of_way_meetpoint<SearchDir, WithBlocked>(w, r, curr, costs, blocked, sharing, elevations);
 
-    // μ-termination: only check after finding first meetpoint
     if (best_cost_ != kInfeasible && !pq1_.empty() && !pq2_.empty()) {
       auto const min_f = pq1_.buckets_[pq1_.get_next_bucket()].back().cost();
       auto const min_r = pq2_.buckets_[pq2_.get_next_bucket()].back().cost();
-      // Terminate only if BOTH searches have costs exceeding the best meetpoint cost
       if (min_f > best_cost_ && min_r > best_cost_) {
-        fmt::println("μ-TERMINATION: forward {} + backward {} > best {}", 
+        fmt::println("μ-TERMINATION: forward {} + backward {} > best {}",
                      min_f, min_r, best_cost_);
         return false;
       }
@@ -417,7 +458,7 @@ struct bidirectional_car_dijkstra {
         break;
       }
     }
-    
+
     if (best_cost_ != kInfeasible && best_cost_ > max) {
       clear_mp();
       return false;
@@ -458,308 +499,308 @@ struct bidirectional_car_dijkstra {
   cost_map cost2_;
   bool max_reached_1_;
   bool max_reached_2_;
-  
-  // CH shortcuts (global storage)
+
   static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_;
-  
-  // Reverse index: shortcuts by target node (for efficient incoming edge lookup)
   static ankerl::unordered_dense::map<node_idx_t, std::vector<shortcut>, hash> shortcuts_by_target_;
-  
-  // CH level assignment (global storage)
   static ankerl::unordered_dense::map<node_idx_t, std::uint32_t, hash> ch_levels_;
-  
+
   static void set_global_ch_level(node_idx_t n, std::uint32_t level) {
     ch_levels_[n] = level;
   }
-  
   static std::uint32_t get_global_ch_level(node_idx_t n) {
     auto it = ch_levels_.find(n);
     return it != ch_levels_.end() ? it->second : 0U;
   }
-  
-  static void clear_global_ch_levels() {
-    ch_levels_.clear();
-  }
-  
+  static void clear_global_ch_levels() { ch_levels_.clear(); }
+
   void assign_ch_levels(ways const& w) {
     auto const n_nodes = w.n_nodes();
-    
-    // Create a vector with levels from 1 to n
     std::vector<std::uint32_t> levels(n_nodes);
     std::iota(levels.begin(), levels.end(), 1U);
-    
-    // Shuffle to randomize levels
     std::random_device rd;
     std::mt19937 gen(rd());
     std::shuffle(levels.begin(), levels.end(), gen);
-    
-    // Assign levels to nodes using global storage
     clear_global_ch_levels();
     for (node_idx_t::value_t i = 0; i < n_nodes; ++i) {
       set_global_ch_level(node_idx_t{i}, levels[i]);
     }
   }
-  
-  std::uint32_t get_ch_level(node_idx_t n) const {
-    return get_global_ch_level(n);
+
+  std::uint32_t get_ch_level(node_idx_t n) const { return get_global_ch_level(n); }
+
+  static shortcut_anchor make_anchor(ways const& w,
+                                     way_idx_t way,
+                                     way_pos_t way_pos,
+                                     direction dir,
+                                     std::uint16_t from,
+                                     std::uint16_t to) {
+    distance_t step_dist = 0;
+    if (way != way_idx_t{} && way != way_idx_t::invalid() && w.r_ != nullptr) {
+      auto const wi  = static_cast<std::size_t>(way.v_);
+      if (wi < w.r_->way_node_dist_.size()) {
+        auto const idx = static_cast<std::size_t>(std::min(from, to));
+        if (idx < w.r_->way_node_dist_[way].size()) {
+          step_dist = w.r_->way_node_dist_[way][idx];
+        }
+      }
+    }
+    return shortcut_anchor{way, way_pos, dir, from, to, step_dist};
   }
-  
-  static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight, 
+
+  static void add_global_shortcut(node_idx_t from, node_idx_t to, cost_t weight,
                                   node_idx_t middle,
-                                  way_pos_t first_way_pos, direction first_dir,
-                                  way_pos_t last_way_pos, direction last_dir) {
-    // Add to forward index (shortcuts from 'from')
-    shortcuts_[from].emplace_back(shortcut{to, weight, middle, 
-                                           first_way_pos, first_dir,
-                                           last_way_pos, last_dir});
-    
-    // Add to reverse index (shortcuts to 'to')
-    shortcuts_by_target_[to].emplace_back(shortcut{from, to, weight, middle,
-                                                   first_way_pos, first_dir,
-                                                   last_way_pos, last_dir});
+                                  shortcut_anchor first_a,
+                                  shortcut_anchor last_a) {
+    shortcuts_[from].emplace_back(shortcut{to, weight, middle, first_a, last_a});
+    shortcuts_by_target_[to].emplace_back(shortcut{from, to, weight, middle, first_a, last_a});
   }
-  
+
   static std::size_t get_global_shortcut_count(node_idx_t from) {
     auto it = shortcuts_.find(from);
     return it != shortcuts_.end() ? it->second.size() : 0;
   }
-  
+
   static void clear_global_shortcuts() {
     shortcuts_.clear();
     shortcuts_by_target_.clear();
   }
-  
+
   static void clear_global_data() {
     clear_global_shortcuts();
     clear_global_ch_levels();
   }
-  
+
   std::size_t get_shortcut_count(node_idx_t from) const {
     return get_global_shortcut_count(from);
   }
-  
-  void clear_shortcuts() {
-    clear_global_shortcuts();
-  }
-  
-  void clear_data() {
-    clear_global_data();
-  }
-  
-  // Discover all incoming edges to node u from nodes with level > level(u)
+
+  void clear_shortcuts() { clear_global_shortcuts(); }
+  void clear_data() { clear_global_data(); }
+
   std::vector<edge_info> get_incoming_edges(ways const& w, node_idx_t u) const {
     std::vector<edge_info> incoming;
     auto const u_level = get_ch_level(u);
-    
-    // Check original graph edges
-    car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
-      car::adjacent<direction::kBackward, false>(
-          *w.r_, n, nullptr, nullptr, nullptr,
+
+    car::resolve_all(*w.r_, u, level_t{}, [&](node const n_at_u) {
+      adjacent<direction::kBackward, false>(
+          *w.r_, n_at_u, nullptr, nullptr, nullptr,
           [&](node const pred, std::uint32_t const cost, distance_t,
               way_idx_t const way, std::uint16_t from, std::uint16_t to,
               elevation_storage::elevation const, bool const) {
             auto const pred_level = get_ch_level(pred.n_);
             if (pred_level > u_level) {
-              edge_info edge{pred.n_, u, static_cast<cost_t>(cost), false};
-              
-              // Find way_pos at pred.n_ for this way
-              edge.first_way_pos = pred.way_;
-              edge.first_dir = pred.dir_;
-              
-              // Way position we arrive at u
-              edge.last_way_pos = n.way_;
-              edge.last_dir = n.dir_;
-              
-              incoming.push_back(edge);
+              edge_info e{};
+              e.from = pred.n_;
+              e.to = u;
+              e.cost = static_cast<cost_t>(cost);
+              e.is_shortcut = false;
+              e.first_way_pos = pred.way_;
+              e.first_dir = pred.dir_;
+              e.first_way = way;
+              e.first_from = from;
+              e.first_to = to;
+              e.last_way_pos = n_at_u.way_;
+              e.last_dir = n_at_u.dir_;
+              e.last_way = way;
+              e.last_from = from;
+              e.last_to = to;
+              incoming.push_back(e);
             }
           });
     });
-    
-    // Check shortcuts pointing to u (using reverse index for efficiency)
-    auto const incoming_shortcuts_it = shortcuts_by_target_.find(u);
-    if (incoming_shortcuts_it != shortcuts_by_target_.end()) {
-      for (auto const& sc : incoming_shortcuts_it->second) {
+
+    if (auto it = shortcuts_by_target_.find(u); it != shortcuts_by_target_.end()) {
+      for (auto const& sc : it->second) {
         auto const from_level = get_ch_level(sc.from);
         if (from_level > u_level) {
-          edge_info edge{sc.from, u, sc.weight, true};
-          edge.first_way_pos = sc.first_way_pos;
-          edge.first_dir = sc.first_dir;
-          edge.last_way_pos = sc.last_way_pos;
-          edge.last_dir = sc.last_dir;
-          incoming.push_back(edge);
+          edge_info e{};
+          e.from = sc.from;
+          e.to = u;
+          e.cost = sc.weight;
+          e.is_shortcut = true;
+          e.first_way_pos = sc.first.way_pos;
+          e.first_dir = sc.first.dir;
+          e.first_way = sc.first.way;
+          e.first_from = sc.first.from;
+          e.first_to = sc.first.to;
+          e.last_way_pos = sc.last.way_pos;
+          e.last_dir = sc.last.dir;
+          e.last_way = sc.last.way;
+          e.last_from = sc.last.from;
+          e.last_to = sc.last.to;
+          incoming.push_back(e);
         }
       }
     }
-    
+
     return incoming;
   }
-  
-  // Discover all outgoing edges from node u to nodes with level > level(u)
+
   std::vector<edge_info> get_outgoing_edges(ways const& w, node_idx_t u) const {
     std::vector<edge_info> outgoing;
     auto const u_level = get_ch_level(u);
-    
-    // Check original graph edges
-    car::resolve_all(*w.r_, u, level_t{}, [&](node const n) {
-      car::adjacent<direction::kForward, false>(
-          *w.r_, n, nullptr, nullptr, nullptr,
+
+    car::resolve_all(*w.r_, u, level_t{}, [&](node const n_at_u) {
+      adjacent<direction::kForward, false>(
+          *w.r_, n_at_u, nullptr, nullptr, nullptr,
           [&](node const succ, std::uint32_t const cost, distance_t,
               way_idx_t const way, std::uint16_t from, std::uint16_t to,
               elevation_storage::elevation const, bool const) {
             auto const succ_level = get_ch_level(succ.n_);
             if (succ_level > u_level) {
-              edge_info edge{u, succ.n_, static_cast<cost_t>(cost), false};
-              
-              // Way position at u we use to leave
-              edge.first_way_pos = n.way_;
-              edge.first_dir = n.dir_;
-              
-              // Way position we arrive at succ
-              edge.last_way_pos = succ.way_;
-              edge.last_dir = succ.dir_;
-              
-              outgoing.push_back(edge);
+              edge_info e{};
+              e.from = u;
+              e.to = succ.n_;
+              e.cost = static_cast<cost_t>(cost);
+              e.is_shortcut = false;
+              e.first_way_pos = n_at_u.way_;
+              e.first_dir = n_at_u.dir_;
+              e.first_way = way;
+              e.first_from = from;
+              e.first_to = to;
+              e.last_way_pos = succ.way_;
+              e.last_dir = succ.dir_;
+              e.last_way = way;
+              e.last_from = from;
+              e.last_to = to;
+              outgoing.push_back(e);
             }
           });
     });
-    
-    // Check shortcuts from u
-    auto const shortcuts_it = shortcuts_.find(u);
-    if (shortcuts_it != shortcuts_.end()) {
-      for (auto const& sc : shortcuts_it->second) {
+
+    if (auto it = shortcuts_.find(u); it != shortcuts_.end()) {
+      for (auto const& sc : it->second) {
         auto const target_level = get_ch_level(sc.target);
         if (target_level > u_level) {
-          edge_info edge{u, sc.target, sc.weight, true};
-          edge.first_way_pos = sc.first_way_pos;
-          edge.first_dir = sc.first_dir;
-          edge.last_way_pos = sc.last_way_pos;
-          edge.last_dir = sc.last_dir;
-          outgoing.push_back(edge);
+          edge_info e{};
+          e.from = u;
+          e.to = sc.target;
+          e.cost = sc.weight;
+          e.is_shortcut = true;
+          e.first_way_pos = sc.first.way_pos;
+          e.first_dir = sc.first.dir;
+          e.first_way = sc.first.way;
+          e.first_from = sc.first.from;
+          e.first_to = sc.first.to;
+          e.last_way_pos = sc.last.way_pos;
+          e.last_dir = sc.last.dir;
+          e.last_way = sc.last.way;
+          e.last_from = sc.last.from;
+          e.last_to = sc.last.to;
+          outgoing.push_back(e);
         }
       }
     }
-    
+
     return outgoing;
   }
-  
-  
-  // Perform contraction of all nodes in ascending CH level order
+
   void perform_contraction(ways const& w) {
     auto const n_nodes = w.n_nodes();
-    
-    // Create list of nodes sorted by CH level
     std::vector<node_idx_t> nodes_by_level;
     nodes_by_level.reserve(n_nodes);
     for (node_idx_t::value_t i = 0; i < n_nodes; ++i) {
       nodes_by_level.emplace_back(node_idx_t{i});
     }
-    
-    // Sort by CH level (ascending)
     std::sort(nodes_by_level.begin(), nodes_by_level.end(),
               [this](node_idx_t a, node_idx_t b) {
                 return get_ch_level(a) < get_ch_level(b);
               });
-    
-    // Contract nodes in level order
+
     std::size_t shortcuts_added = 0;
     std::size_t nodes_contracted = 0;
-    
+
     for (auto const u : nodes_by_level) {
       auto const node_shortcuts = contract_node(w, u);
       shortcuts_added += node_shortcuts;
       ++nodes_contracted;
-      fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}", 
+      fmt::println("Contracted node {} (level {}): {} shortcuts added, total: {}",
                    u.v_, get_ch_level(u), node_shortcuts, shortcuts_added);
     }
-    
-    fmt::println("Contraction complete: {} nodes contracted, {} shortcuts added", nodes_contracted, shortcuts_added);
+
+    fmt::println("Contraction complete: {} nodes contracted, {} shortcuts added",
+                 nodes_contracted, shortcuts_added);
   }
-  
-  // Contract a single node u
+
   std::size_t contract_node(ways const& w, node_idx_t u) {
     auto const incoming = get_incoming_edges(w, u);
     auto const outgoing = get_outgoing_edges(w, u);
-    
+
     std::size_t shortcuts_added = 0;
     auto const u_level = get_ch_level(u);
-    
-    // For each incoming edge from v to u
+
     for (auto const& in_edge : incoming) {
       auto const v = in_edge.from;
-      
-      // For each outgoing edge from u to w  
+
       for (auto const& out_edge : outgoing) {
         auto const w_target = out_edge.to;
-        
-        // Skip self-loops
+
         if (v == w_target) {
           continue;
         }
-        
-        // Check if turn from (v,u) to (u,w) is allowed
-        // We need to check if we can go from in_edge.last_way_pos to out_edge.first_way_pos at u
-        if ((*w.r_).is_restricted<direction::kForward>(u, in_edge.last_way_pos, out_edge.first_way_pos)) {
+
+        if ((*w.r_).is_restricted<direction::kForward>(
+                u, in_edge.last_way_pos, out_edge.first_way_pos)) {
           continue;
         }
-        
+
         auto const shortcut_cost = in_edge.cost + out_edge.cost;
-        
-        // Check for overflow
         if (shortcut_cost > kInfeasible) {
           continue;
         }
-        
-        // Run witness search to check if shortest v->w path goes through u
-        auto const witness_cost = witness_search(w, v, w_target, u, u_level, 
+
+        auto const witness_cost = witness_search(w, v, w_target, u, u_level,
                                                  in_edge.first_way_pos, in_edge.first_dir);
-        
-        // Add shortcut if the path through u is necessary (no witness or witness is more expensive)
+
         if (witness_cost > shortcut_cost) {
-          add_global_shortcut(v, w_target, static_cast<cost_t>(shortcut_cost), u,
-                            in_edge.first_way_pos, in_edge.first_dir,
-                            out_edge.last_way_pos, out_edge.last_dir);
+          auto const first_a = make_anchor(w,
+                                           in_edge.first_way,
+                                           in_edge.first_way_pos,
+                                           in_edge.first_dir,
+                                           in_edge.first_from,
+                                           in_edge.first_to);
+
+          auto const last_a  = make_anchor(w,
+                                           out_edge.last_way,
+                                           out_edge.last_way_pos,
+                                           out_edge.last_dir,
+                                           out_edge.last_from,
+                                           out_edge.last_to);
+
+          add_global_shortcut(v, w_target,
+                              static_cast<cost_t>(shortcut_cost), u,
+                              first_a, last_a);
           ++shortcuts_added;
         }
       }
     }
-    
+
     return shortcuts_added;
   }
-  
 
-
-
-  // Witness search: Check if shortest v->w path in remaining graph (level >= u_level) goes through u
-  // Returns cost of shortest path NOT going through u, or kInfeasible if no such path exists
   cost_t witness_search(ways const& w, node_idx_t v, node_idx_t target,
-                       node_idx_t u, std::uint32_t u_level,
-                       way_pos_t start_way_pos, direction start_dir) const {
-    
-    // We run a Dijkstra from v to target on the remaining graph (nodes with level > u_level)
-    // excluding node u. Any path found doesn't go through u.
-    
+                        node_idx_t u, std::uint32_t u_level,
+                        way_pos_t start_way_pos, direction start_dir) const {
+
     struct State {
       node_idx_t node;
       way_pos_t way_pos;
       direction dir;
       cost_t cost;
-      
       bool operator>(State const& other) const { return cost > other.cost; }
     };
-    
+
     std::priority_queue<State, std::vector<State>, std::greater<State>> pq;
-    
-    // Map from (node, way_pos, dir) to (cost, predecessor)
+
     struct StateKey {
       node_idx_t node;
       way_pos_t way_pos;
       direction dir;
-      
       bool operator==(StateKey const& other) const {
         return node == other.node && way_pos == other.way_pos && dir == other.dir;
       }
     };
-    
+
     struct StateKeyHash {
       std::size_t operator()(StateKey const& k) const {
         return std::hash<std::uint64_t>{}(
@@ -769,96 +810,60 @@ struct bidirectional_car_dijkstra {
         );
       }
     };
-    
+
     std::unordered_map<StateKey, cost_t, StateKeyHash> dist;
-    
-    // Start from all possible states at v with the given way_pos and direction
+
     pq.push({v, start_way_pos, start_dir, 0U});
     dist[{v, start_way_pos, start_dir}] = 0U;
-    
-    // Since we exclude u from the search, any path found doesn't go through u
-    
+
     while (!pq.empty()) {
       auto const curr = pq.top();
       pq.pop();
-      
-      // Check if we've reached target
+
       if (curr.node == target) {
-        // Since we excluded u from search, this path doesn't go through u
         return curr.cost;
       }
-      
-      // Skip if not optimal
+
       auto const state_key = StateKey{curr.node, curr.way_pos, curr.dir};
       auto const dist_it = dist.find(state_key);
       if (dist_it != dist.end() && curr.cost > dist_it->second) {
         continue;
       }
-      
-      // Expand normal edges (only to nodes with level >= u_level)
-      car::resolve_all(*w.r_, curr.node, level_t{}, [&](node const n) {
-        if (n.way_ != curr.way_pos || n.dir_ != curr.dir) {
-          return;
-        }
-        
-        car::adjacent<direction::kForward, false>(
-            *w.r_, n, nullptr, nullptr, nullptr,
-            [&](node const succ, std::uint32_t const edge_cost, distance_t,
-                way_idx_t const, std::uint16_t, std::uint16_t,
-                elevation_storage::elevation const, bool const) {
-              
-              // Only consider nodes in remaining graph (level > u_level, excluding u)
-              if (get_ch_level(succ.n_) <= u_level) {
-                return;
-              }
-              
-              auto const new_cost = curr.cost + edge_cost;
-              auto const new_key = StateKey{succ.n_, succ.way_, succ.dir_};
-              
-              auto const existing = dist.find(new_key);
-              if (existing == dist.end() || new_cost < existing->second) {
-                dist[new_key] = new_cost;
-                pq.push({succ.n_, succ.way_, succ.dir_, static_cast<cost_t>(new_cost)});
-              }
-            });
-      });
-      
-      // Expand shortcuts (check turn restrictions)
-      auto const shortcuts_it = shortcuts_.find(curr.node);
-      if (shortcuts_it != shortcuts_.end()) {
-        for (auto const& sc : shortcuts_it->second) {
-          // Only to nodes in remaining graph (level > u_level, excluding u)
-          if (get_ch_level(sc.target) <= u_level) {
-            continue;
+
+      if (curr.node != u) {
+        car::resolve_all(*w.r_, curr.node, level_t{}, [&](node const n) {
+          if (n.way_ != curr.way_pos || n.dir_ != curr.dir) {
+            return;
           }
-          
-          // Check turn restriction: can we go from curr.way_pos to sc.first_way_pos?
-          if ((*w.r_).is_restricted<direction::kForward>(curr.node, curr.way_pos, sc.first_way_pos)) {
-            continue;
-          }
-          
-          auto const new_cost = curr.cost + sc.weight;
-          auto const new_key = StateKey{sc.target, sc.last_way_pos, sc.last_dir};
-          
-          auto const existing = dist.find(new_key);
-          if (existing == dist.end() || new_cost < existing->second) {
-            dist[new_key] = new_cost;
-            pq.push({sc.target, sc.last_way_pos, sc.last_dir, static_cast<cost_t>(new_cost)});
-          }
-        }
+
+          adjacent<direction::kForward, false>(
+              *w.r_, n, nullptr, nullptr, nullptr,
+              [&](node const succ, std::uint32_t const edge_cost, distance_t,
+                  way_idx_t const, std::uint16_t, std::uint16_t,
+                  elevation_storage::elevation const, bool const) {
+
+                if (succ.n_ == u) { return; }
+                if (get_ch_level(succ.n_) <= u_level) { return; }
+
+                auto const new_cost = curr.cost + edge_cost;
+                StateKey const nk{succ.n_, succ.way_, succ.dir_};
+                auto const it2 = dist.find(nk);
+                if (it2 == dist.end() || new_cost < it2->second) {
+                  dist[nk] = new_cost;
+                  pq.push({succ.n_, succ.way_, succ.dir_, static_cast<cost_t>(new_cost)});
+                }
+              });
+        });
       }
     }
-    
-    // No path found to target in remaining graph
+
     return kInfeasible;
   }
-  
-  // Unpack a path by recursively expanding shortcuts
+
+  // (Unpacking kept but unused for now)
   std::vector<node_idx_t> unpack_path(node_idx_t from, node_idx_t to) const {
     std::vector<node_idx_t> path;
     unpack_path_recursive(from, to, path);
-    
-    // Log first 3 nodes for debugging
     fmt::print("Unpacked path ({} nodes): ", path.size());
     for (auto i = 0U; i < std::min(3U, static_cast<unsigned>(path.size())); ++i) {
       fmt::print("{}", path[i].v_);
@@ -870,22 +875,18 @@ struct bidirectional_car_dijkstra {
       fmt::print(" -> ... -> {}", path.back().v_);
     }
     fmt::println("");
-    
     return path;
   }
-  
+
 private:
-  // Recursive helper for path unpacking
   void unpack_path_recursive(node_idx_t from, node_idx_t to, std::vector<node_idx_t>& path) const {
     fmt::println("Unpacking path segment: {} -> {}", from.v_, to.v_);
-    
-    // Check if there's a shortcut from 'from' to 'to'
-    auto const shortcuts_it = shortcuts_.find(from);
-    if (shortcuts_it != shortcuts_.end()) {
-      for (auto const& sc : shortcuts_it->second) {
+
+    auto const it = shortcuts_.find(from);
+    if (it != shortcuts_.end()) {
+      for (auto const& sc : it->second) {
         if (sc.target == to && sc.middle != node_idx_t::invalid()) {
-          // Found shortcut via middle node - unpack recursively
-          fmt::println("  Shortcut found: {} -> {} via middle {}", 
+          fmt::println("  Shortcut found: {} -> {} via middle {}",
                        from.v_, to.v_, sc.middle.v_);
           unpack_path_recursive(from, sc.middle, path);
           unpack_path_recursive(sc.middle, to, path);
@@ -893,21 +894,24 @@ private:
         }
       }
     }
-    
-    // No shortcut found - this should be a direct edge in the original graph
+
     fmt::println("  Direct edge: {} -> {}", from.v_, to.v_);
     if (path.empty() || path.back() != from) {
       path.push_back(from);
     }
     path.push_back(to);
   }
-  
+
 public:
 };
 
-// Static member definitions
-inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_{};
-inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::shortcuts_by_target_{};
-inline ankerl::unordered_dense::map<node_idx_t, std::uint32_t, bidirectional_car_dijkstra::hash> bidirectional_car_dijkstra::ch_levels_{};
+inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash>
+    bidirectional_car_dijkstra::shortcuts_{};
+
+inline ankerl::unordered_dense::map<node_idx_t, std::vector<bidirectional_car_dijkstra::shortcut>, bidirectional_car_dijkstra::hash>
+    bidirectional_car_dijkstra::shortcuts_by_target_{};
+
+inline ankerl::unordered_dense::map<node_idx_t, std::uint32_t, bidirectional_car_dijkstra::hash>
+    bidirectional_car_dijkstra::ch_levels_{};
 
 }  // namespace osr

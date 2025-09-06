@@ -160,9 +160,9 @@ void run(ways const& w,
       ++n_congruent;
       // Print results when both algorithms found the same solution
       if (reference && experiment && !from_matches.empty() && !to_matches.empty()) {
-        fmt::println("MATCH: {} --> {} | dijkstra: {} | ch: {} | dist: {:.2f}",
+        /*fmt::println("MATCH: {} --> {} | dijkstra: {} | ch: {} | dist: {:.2f}",
                      w.node_to_osm_[from_node], w.node_to_osm_[to_node],
-                     reference->cost_, experiment->cost_, experiment->dist_);
+                     reference->cost_, experiment->cost_, experiment->dist_);*/
       }
     }
 

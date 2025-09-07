@@ -593,7 +593,9 @@ struct bidirectional_car_dijkstra {
       }
       
       // Find all predecessors with higher level
-      std::vector<car_state> predecessors;
+      std::vector<std::pair<car_state, cost_t>> predecessors;  // Store state and cost to contracted
+      
+      // First, get direct edge predecessors
       if (legal_predecessors_.find(contracted_node) == legal_predecessors_.end()) {
         node curr_node{contracted_node.n, contracted_node.way, contracted_node.dir};
         build_adjacency_for_node<direction::kBackward, WithBlocked>(
@@ -605,13 +607,38 @@ struct bidirectional_car_dijkstra {
         for (auto const& edge : pred_it->second) {
           car_state pred{edge.target.n_, edge.target.way_, edge.target.dir_};
           if (node_levels_[pred] > contracted_level) {
-            predecessors.push_back(pred);
+            predecessors.emplace_back(pred, edge.cost);
+          }
+        }
+      }
+      
+      // Also include nodes that have shortcuts TO contracted_node
+      auto const shortcut_pred_it = shortcut_predecessors_.find(contracted_node);
+      if (shortcut_pred_it != shortcut_predecessors_.end()) {
+        for (auto const& shortcut : shortcut_pred_it->second) {
+          car_state pred{shortcut.target.n_, shortcut.target.way_, shortcut.target.dir_};
+          if (node_levels_[pred] > contracted_level) {
+            // Check if we already have this predecessor (avoid duplicates)
+            bool found = false;
+            for (auto& [existing_pred, existing_cost] : predecessors) {
+              if (existing_pred == pred) {
+                // Update cost if this shortcut provides a better path
+                existing_cost = std::min(existing_cost, shortcut.cost);
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              predecessors.emplace_back(pred, shortcut.cost);
+            }
           }
         }
       }
       
       // Find all successors with higher level
-      std::vector<car_state> successors;
+      std::vector<std::pair<car_state, cost_t>> successors;  // Store state and cost from contracted
+      
+      // First, get direct edge successors
       if (legal_successors_.find(contracted_node) == legal_successors_.end()) {
         node curr_node{contracted_node.n, contracted_node.way, contracted_node.dir};
         build_adjacency_for_node<direction::kForward, WithBlocked>(
@@ -623,57 +650,38 @@ struct bidirectional_car_dijkstra {
         for (auto const& edge : succ_it->second) {
           car_state succ{edge.target.n_, edge.target.way_, edge.target.dir_};
           if (node_levels_[succ] > contracted_level) {
-            successors.push_back(succ);
+            successors.emplace_back(succ, edge.cost);
+          }
+        }
+      }
+      
+      // Also include nodes that contracted_node has shortcuts TO
+      auto const shortcut_succ_it = shortcut_successors_.find(contracted_node);
+      if (shortcut_succ_it != shortcut_successors_.end()) {
+        for (auto const& shortcut : shortcut_succ_it->second) {
+          car_state succ{shortcut.target.n_, shortcut.target.way_, shortcut.target.dir_};
+          if (node_levels_[succ] > contracted_level) {
+            // Check if we already have this successor (avoid duplicates)
+            bool found = false;
+            for (auto& [existing_succ, existing_cost] : successors) {
+              if (existing_succ == succ) {
+                // Update cost if this shortcut provides a better path
+                existing_cost = std::min(existing_cost, shortcut.cost);
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              successors.emplace_back(succ, shortcut.cost);
+            }
           }
         }
       }
       
       // Check all predecessor-successor pairs for shortcuts
-      for (auto const& pred : predecessors) {
-        // Ensure pred's forward adjacency is built
-        if (legal_successors_.find(pred) == legal_successors_.end()) {
-          node pred_node{pred.n, pred.way, pred.dir};
-          build_adjacency_for_node<direction::kForward, WithBlocked>(
-              w, r, pred_node, blocked, sharing, elevations);
-        }
-        
-        auto const& pred_edges = legal_successors_[pred];
-        cost_t cost_to_contracted = kInfeasible;
-        
-        // Find cost from predecessor to contracted node
-        for (auto const& edge : pred_edges) {
-          car_state target{edge.target.n_, edge.target.way_, edge.target.dir_};
-          if (target == contracted_node) {
-            cost_to_contracted = edge.cost;
-            break;
-          }
-        }
-        
-        if (cost_to_contracted == kInfeasible) continue;
-        
-        for (auto const& succ : successors) {
+      for (auto const& [pred, cost_to_contracted] : predecessors) {
+        for (auto const& [succ, cost_from_contracted] : successors) {
           if (pred == succ) continue; // Skip self-loops
-          
-          // Ensure succ's backward adjacency is built
-          if (legal_predecessors_.find(succ) == legal_predecessors_.end()) {
-            node succ_node{succ.n, succ.way, succ.dir};
-            build_adjacency_for_node<direction::kBackward, WithBlocked>(
-                w, r, succ_node, blocked, sharing, elevations);
-          }
-          
-          auto const& succ_edges = legal_predecessors_[succ];
-          cost_t cost_from_contracted = kInfeasible;
-          
-          // Find cost from contracted node to successor
-          for (auto const& edge : succ_edges) {
-            car_state source{edge.target.n_, edge.target.way_, edge.target.dir_};
-            if (source == contracted_node) {
-              cost_from_contracted = edge.cost;
-              break;
-            }
-          }
-          
-          if (cost_from_contracted == kInfeasible) continue;
           
           cost_t shortcut_cost = cost_to_contracted + cost_from_contracted;
           

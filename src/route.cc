@@ -360,9 +360,39 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
     if (pred.has_value()) {
       auto const expected_cost = static_cast<cost_t>(
           e.cost(forward_n) - bcd.template get_cost<direction::kForward>(*pred));
-      forward_dist +=
-          add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
-                        forward_n, expected_cost, forward_segments, dir);
+      
+      // Check if this is a shortcut by trying to find a direct edge
+      bool is_shortcut = true;
+      car::adjacent<direction::kForward, false>(
+          *w.r_, *pred, nullptr, nullptr, nullptr,
+          [&](car::node const target, std::uint32_t const cost, distance_t const,
+              way_idx_t const, std::uint16_t const, std::uint16_t const,
+              elevation_storage::elevation const, bool const) {
+            if (target.n_ == forward_n.n_ && target.way_ == forward_n.way_ && target.dir_ == forward_n.dir_ && static_cast<cost_t>(cost) == expected_cost) {
+              is_shortcut = false;  // Found exact matching direct edge
+            }
+          });
+      
+      if (!is_shortcut) {
+        // Normal edge - use add_path
+        forward_dist +=
+            add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
+                          forward_n, expected_cost, forward_segments, dir);
+      } else {
+        // Shortcut - create a simplified segment
+        auto& segment = forward_segments.emplace_back();
+        segment.way_ = way_idx_t::invalid();
+        segment.dist_ = 0;  // We don't know the actual distance for shortcuts
+        segment.cost_ = expected_cost;
+        segment.elevation_ = elevation_storage::elevation{};
+        segment.mode_ = forward_n.get_mode();
+        segment.from_level_ = level_t{0.0F};
+        segment.to_level_ = level_t{0.0F};
+        segment.from_ = dir == direction::kBackward ? forward_n.get_node() : pred->get_node();
+        segment.to_ = dir == direction::kBackward ? pred->get_node() : forward_n.get_node();
+        segment.polyline_ = {w.get_node_pos(segment.from_).as_latlng(),
+                             w.get_node_pos(segment.to_).as_latlng()};
+      }
     } else {
       break;
     }
@@ -395,13 +425,41 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
     auto const& e = bcd.cost2_.at(backward_n.get_key());
     auto const pred = e.pred(backward_n);
     if (pred.has_value()) {
-
-      auto const expected_cost =
-          static_cast<cost_t>(e.cost(backward_n) -
-                              bcd.template get_cost<direction::kBackward>(*pred));
-      backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
-                                     *pred, backward_n, expected_cost,
-                                     backward_segments, opposite(dir));
+      auto const expected_cost = static_cast<cost_t>(
+          e.cost(backward_n) - bcd.template get_cost<direction::kBackward>(*pred));
+      
+      // Check if this is a shortcut by trying to find a direct edge
+      bool is_shortcut = true;
+      car::adjacent<direction::kForward, false>(
+          *w.r_, *pred, nullptr, nullptr, nullptr,
+          [&](car::node const target, std::uint32_t const cost, distance_t const,
+              way_idx_t const, std::uint16_t const, std::uint16_t const,
+              elevation_storage::elevation const, bool const) {
+            if (target.n_ == backward_n.n_ && target.way_ == backward_n.way_ && target.dir_ == backward_n.dir_ && static_cast<cost_t>(cost) == expected_cost) {
+              is_shortcut = false;  // Found exact matching direct edge
+            }
+          });
+      
+      if (!is_shortcut) {
+        // Normal edge - use add_path
+        backward_dist +=
+            add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
+                          backward_n, expected_cost, backward_segments, opposite(dir));
+      } else {
+        // Shortcut - create a simplified segment
+        auto& segment = backward_segments.emplace_back();
+        segment.way_ = way_idx_t::invalid();
+        segment.dist_ = 0;  // We don't know the actual distance for shortcuts
+        segment.cost_ = expected_cost;
+        segment.elevation_ = elevation_storage::elevation{};
+        segment.mode_ = backward_n.get_mode();
+        segment.from_level_ = level_t{0.0F};
+        segment.to_level_ = level_t{0.0F};
+        segment.from_ = dir == direction::kForward ? backward_n.get_node() : pred->get_node();
+        segment.to_ = dir == direction::kBackward ? pred->get_node() : backward_n.get_node();
+        segment.polyline_ = {w.get_node_pos(segment.from_).as_latlng(),
+                             w.get_node_pos(segment.to_).as_latlng()};
+      }
     } else {
       break;
     }

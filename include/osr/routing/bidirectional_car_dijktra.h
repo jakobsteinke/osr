@@ -99,8 +99,7 @@ struct bidirectional_car_dijkstra {
     cost_t operator()(label const& l) { return l.cost(); }
   };
   
-  bidirectional_car_dijkstra() 
-    : ch_enabled_(true) {}
+  bidirectional_car_dijkstra() {}
 
   void clear_mp() {
     meet_point_1_ = node::invalid();
@@ -123,8 +122,8 @@ struct bidirectional_car_dijkstra {
     max_reached_1_ = false;
     max_reached_2_ = false;
     
-    // Only clear adjacency maps if CH is not enabled/preprocessed
-    if (!ch_enabled_ || !is_preprocessed_) {
+    // Only clear adjacency maps if CH is not preprocessed
+    if (!is_preprocessed_) {
       legal_successors_.clear();
       legal_predecessors_.clear();
     }
@@ -715,7 +714,6 @@ struct bidirectional_car_dijkstra {
       }
     }
     
-    ch_enabled_ = true;
     is_preprocessed_ = true;
     
     // Always print shortcut count
@@ -779,7 +777,7 @@ struct bidirectional_car_dijkstra {
     if (it != adj_map.end()) {
       // Get current node level for CH filtering
       std::uint32_t curr_level = 0;
-      if (ch_enabled_) {
+      if (is_preprocessed_) {
         auto level_it = node_levels_.find(curr_key);
         if (level_it != node_levels_.end()) {
           curr_level = level_it->second;
@@ -793,7 +791,7 @@ struct bidirectional_car_dijkstra {
         }
         
         // CH level filtering: forward search goes upward, backward goes upward too
-        if (ch_enabled_) {
+        if (is_preprocessed_) {
           car_state target_state{edge.target.n_, edge.target.way_, edge.target.dir_};
           auto target_level_it = node_levels_.find(target_state);
           if (target_level_it != node_levels_.end()) {
@@ -805,7 +803,7 @@ struct bidirectional_car_dijkstra {
                            target_level, curr_level, 
                            SearchDir == direction::kForward ? "FWD" : "BWD");
               }
-              continue;
+              //continue;
             } else {
               if constexpr (kDebugMaps) {
                 fmt::println("  CH ALLOW: target level {} > curr level {} (SearchDir={})", 
@@ -852,7 +850,7 @@ struct bidirectional_car_dijkstra {
     }
 
     // 2) Process shortcuts if CH is enabled
-    if (ch_enabled_ && is_preprocessed_) {
+    if (is_preprocessed_) {
       auto const& shortcut_map = (SearchDir == direction::kForward) ? shortcut_successors_ : shortcut_predecessors_;
       auto shortcut_it = shortcut_map.find(curr_key);
       if (shortcut_it != shortcut_map.end()) {
@@ -1077,7 +1075,7 @@ struct bidirectional_car_dijkstra {
     }
   }
 
-  bool is_ch_enabled() const { return ch_enabled_; }
+  bool is_ch_enabled() const { return is_preprocessed_; }
   bool is_ch_preprocessed() const { return is_preprocessed_; }
 
   dial<label, get_bucket> pq1_{get_bucket{}};
@@ -1093,9 +1091,6 @@ struct bidirectional_car_dijkstra {
   bool max_reached_2_;
   adjacency_map legal_successors_;
   adjacency_map legal_predecessors_;
-  
-  // Contraction Hierarchies specific members (per-instance)
-  bool ch_enabled_;
   
   // Global CH data shared across all instances
   static inline bool is_preprocessed_ = false;

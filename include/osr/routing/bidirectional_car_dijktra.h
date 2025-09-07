@@ -93,14 +93,14 @@ struct bidirectional_car_dijkstra {
   using adjacency_map = ankerl::unordered_dense::map<car_state, std::vector<edge_transition>, car_state_hash>;
 
   constexpr static auto const kDebug = false;
-  constexpr static auto const kDebugMaps = true;  // Set to true to see adjacency map structure
+  constexpr static auto const kDebugMaps = false;  // Set to true to see adjacency map structure
 
   struct get_bucket {
     cost_t operator()(label const& l) { return l.cost(); }
   };
   
   bidirectional_car_dijkstra() 
-    : ch_enabled_(false), is_preprocessed_(false), rng_(std::random_device{}()) {}
+    : ch_enabled_(true) {}
 
   void clear_mp() {
     meet_point_1_ = node::invalid();
@@ -177,9 +177,16 @@ struct bidirectional_car_dijkstra {
     
     if constexpr (kDebugMaps) {
       auto const& map = (SearchDir == direction::kForward) ? legal_successors_ : legal_predecessors_;
-      std::cout << "Stored " << map.at(source_key).size() << " transitions in " 
-                << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
-                << " map\n";
+      auto it = map.find(source_key);
+      if (it != map.end()) {
+        std::cout << "Stored " << it->second.size() << " transitions in " 
+                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
+                  << " map\n";
+      } else {
+        std::cout << "No transitions stored for this node in " 
+                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
+                  << " map\n";
+      }
       std::cout << "=================================\n";
     }
   }
@@ -490,6 +497,7 @@ struct bidirectional_car_dijkstra {
             w, r, curr_node, blocked, sharing, elevations);
       }
       
+      // Expand normal edges
       auto const adj_it = legal_successors_.find(current);
       if (adj_it != legal_successors_.end()) {
         for (auto const& edge : adj_it->second) {
@@ -506,6 +514,32 @@ struct bidirectional_car_dijkstra {
           if (neighbor_it == distances.end() || new_cost < neighbor_it->second) {
             distances[neighbor] = new_cost;
             pq.emplace(new_cost, neighbor);
+          }
+        }
+      }
+      
+      // ALSO expand existing shortcuts (from previous contractions)
+      auto const shortcut_it = shortcut_successors_.find(current);
+      if (shortcut_it != shortcut_successors_.end()) {
+        for (auto const& shortcut : shortcut_it->second) {
+          car_state neighbor{shortcut.target.n_, shortcut.target.way_, shortcut.target.dir_};
+          
+          // CH constraint: only expand to higher level nodes
+          if (node_levels_[neighbor] <= current_level) {
+            continue;
+          }
+          
+          cost_t new_cost = cost + shortcut.cost;
+          auto const neighbor_it = distances.find(neighbor);
+          
+          if (neighbor_it == distances.end() || new_cost < neighbor_it->second) {
+            distances[neighbor] = new_cost;
+            pq.emplace(new_cost, neighbor);
+            
+            if constexpr (kDebugMaps) {
+              fmt::println("    Using existing shortcut {} -> {} [cost={}] in witness search", 
+                         current.n, neighbor.n, shortcut.cost);
+            }
           }
         }
       }
@@ -597,6 +631,13 @@ struct bidirectional_car_dijkstra {
       
       // Check all predecessor-successor pairs for shortcuts
       for (auto const& pred : predecessors) {
+        // Ensure pred's forward adjacency is built
+        if (legal_successors_.find(pred) == legal_successors_.end()) {
+          node pred_node{pred.n, pred.way, pred.dir};
+          build_adjacency_for_node<direction::kForward, WithBlocked>(
+              w, r, pred_node, blocked, sharing, elevations);
+        }
+        
         auto const& pred_edges = legal_successors_[pred];
         cost_t cost_to_contracted = kInfeasible;
         
@@ -613,6 +654,13 @@ struct bidirectional_car_dijkstra {
         
         for (auto const& succ : successors) {
           if (pred == succ) continue; // Skip self-loops
+          
+          // Ensure succ's backward adjacency is built
+          if (legal_predecessors_.find(succ) == legal_predecessors_.end()) {
+            node succ_node{succ.n, succ.way, succ.dir};
+            build_adjacency_for_node<direction::kBackward, WithBlocked>(
+                w, r, succ_node, blocked, sharing, elevations);
+          }
           
           auto const& succ_edges = legal_predecessors_[succ];
           cost_t cost_from_contracted = kInfeasible;
@@ -640,10 +688,11 @@ struct bidirectional_car_dijkstra {
             node contracted_car_node{contracted_node.n, contracted_node.way, contracted_node.dir};
             node succ_node{succ.n, succ.way, succ.dir};
             
+            // Add shortcut to static shortcut maps
             // Check if shortcut already exists and update if necessary
             bool shortcut_added = false;
-            auto& pred_successors = legal_successors_[pred];
-            for (auto& edge : pred_successors) {
+            auto& pred_shortcuts = shortcut_successors_[pred];
+            for (auto& edge : pred_shortcuts) {
               car_state edge_target{edge.target.n_, edge.target.way_, edge.target.dir_};
               if (edge_target == succ) {
                 if (shortcut_cost < edge.cost) {
@@ -656,8 +705,8 @@ struct bidirectional_car_dijkstra {
             }
             
             if (!shortcut_added) {
-              pred_successors.emplace_back(succ_node, shortcut_cost, contracted_car_node);
-              legal_predecessors_[succ].emplace_back(
+              pred_shortcuts.emplace_back(succ_node, shortcut_cost, contracted_car_node);
+              shortcut_predecessors_[succ].emplace_back(
                   node{pred.n, pred.way, pred.dir}, shortcut_cost, contracted_car_node);
               ++shortcuts_added;
             }
@@ -669,9 +718,10 @@ struct bidirectional_car_dijkstra {
     ch_enabled_ = true;
     is_preprocessed_ = true;
     
+    // Always print shortcut count
+    fmt::println("CH preprocessing complete! Added {} shortcuts", shortcuts_added);
+    
     if constexpr (kDebugMaps) {
-      std::cout << "CH preprocessing complete!\n";
-      std::cout << "Added " << shortcuts_added << " shortcuts\n";
       std::cout << "===================================\n";
     }
   }
@@ -796,6 +846,83 @@ struct bidirectional_car_dijkstra {
         } else {
           if constexpr (kDebug) {
             std::cout << " -> DOMINATED\n";
+          }
+        }
+      }
+    }
+
+    // 2) Process shortcuts if CH is enabled
+    if (ch_enabled_ && is_preprocessed_) {
+      auto const& shortcut_map = (SearchDir == direction::kForward) ? shortcut_successors_ : shortcut_predecessors_;
+      auto shortcut_it = shortcut_map.find(curr_key);
+      if (shortcut_it != shortcut_map.end()) {
+        // Get current node level for CH filtering
+        std::uint32_t curr_level = 0;
+        auto level_it = node_levels_.find(curr_key);
+        if (level_it != node_levels_.end()) {
+          curr_level = level_it->second;
+        }
+
+        if constexpr (kDebugMaps) {
+          std::cout << "\n>>> Processing shortcuts for ";
+          curr.print(std::cout, w);
+          std::cout << "\n    Found " << shortcut_it->second.size() << " shortcuts\n";
+        }
+
+        for (auto const& shortcut : shortcut_it->second) {
+          // CH level filtering for shortcuts
+          car_state target_state{shortcut.target.n_, shortcut.target.way_, shortcut.target.dir_};
+          auto target_level_it = node_levels_.find(target_state);
+          if (target_level_it != node_levels_.end()) {
+            auto target_level = target_level_it->second;
+            // Only follow shortcuts to higher level nodes
+            if (target_level <= curr_level) {
+              if constexpr (kDebugMaps) {
+                fmt::println("  CH SKIP SHORTCUT: target level {} <= curr level {} (SearchDir={})", 
+                           target_level, curr_level, 
+                           SearchDir == direction::kForward ? "FWD" : "BWD");
+              }
+              continue;
+            } else {
+              if constexpr (kDebugMaps) {
+                fmt::println("  CH ALLOW SHORTCUT: target level {} > curr level {} (SearchDir={})", 
+                           target_level, curr_level,
+                           SearchDir == direction::kForward ? "FWD" : "BWD");
+              }
+            }
+          } else {
+            if constexpr (kDebugMaps) {
+              fmt::println("  CH SKIP SHORTCUT: target level not found");
+            }
+            continue;
+          }
+
+          auto const total = curr_cost + shortcut.cost;
+          if (total >= max) {
+            if (SearchDir == direction::kForward) {
+              max_reached_1_ = true;
+            } else {
+              max_reached_2_ = true;
+            }
+            continue;
+          }
+
+          if (total < max &&
+              costs[shortcut.target.get_key()].update(
+                  l, shortcut.target, static_cast<cost_t>(total), curr)) {
+
+            auto next = label{shortcut.target, static_cast<cost_t>(total)};
+            // For shortcuts, we need to track the middle node info
+            next.track(l, r, shortcut.way, shortcut.target.get_node(), false);
+            pq.push(std::move(next));
+
+            if constexpr (kDebugMaps) {
+              std::cout << "    -> SHORTCUT PUSH\n";
+            }
+          } else {
+            if constexpr (kDebugMaps) {
+              std::cout << "    -> SHORTCUT DOMINATED\n";
+            }
           }
         }
       }
@@ -943,12 +1070,16 @@ struct bidirectional_car_dijkstra {
   adjacency_map legal_successors_;
   adjacency_map legal_predecessors_;
   
-  // Contraction Hierarchies specific members
+  // Contraction Hierarchies specific members (per-instance)
   bool ch_enabled_;
-  ankerl::unordered_dense::map<car_state, std::uint32_t, car_state_hash> node_levels_;
-  std::vector<car_state> all_nodes_;  // All reachable car_states
-  bool is_preprocessed_;
-  std::mt19937 rng_;
+  
+  // Global CH data shared across all instances
+  static inline bool is_preprocessed_ = false;
+  static inline ankerl::unordered_dense::map<car_state, std::uint32_t, car_state_hash> node_levels_;
+  static inline std::vector<car_state> all_nodes_;  // All reachable car_states
+  static inline adjacency_map shortcut_successors_;
+  static inline adjacency_map shortcut_predecessors_;
+  static inline std::mt19937 rng_{std::random_device{}()};
 };
 
 }  // namespace osr

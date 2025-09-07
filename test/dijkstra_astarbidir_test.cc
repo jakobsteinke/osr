@@ -30,7 +30,7 @@ namespace fs = std::filesystem;
 using namespace osr;
 
 constexpr auto const kUseMultithreading = true;
-constexpr auto const kPrintDebugGeojson = true;
+constexpr auto const kPrintDebugGeojson = false;
 constexpr auto const kMaxMatchDistance = 100;
 constexpr auto const kMaxAllowedPathDifferenceRatio = 0.5;
 constexpr auto const kEnableCH = true;  // Enable Contraction Hierarchies

@@ -337,60 +337,6 @@ path reconstruct_bi(ways const& w,
   return p;
 }
 
-// Store path segment info and try to get actual path segment if it's a direct edge
-// file: src/osr/routing/route.cc
-// ... [unchanged includes and all the code above] ...
-
-// Store path segment info WITHOUT validating base-edge adjacency.
-// We’re not unpacking yet; we just need correct total cost.
-double add_path_ch(ways const& /*w*/,
-                   ways::routing const& /*r*/,
-                   bitvec<node_idx_t> const* /*blocked*/,
-                   sharing_data const* /*sharing*/,
-                   elevation_storage const* /*elevations*/,
-                   bidirectional_car_dijkstra const& bcd,
-                   car::node const from,
-                   car::node const to,
-                   cost_t const expected_cost,
-                   std::vector<path::segment>& segments,
-                   direction const /*dir*/) {
-  // Optional: detect if this (from -> to) matches a stored shortcut
-  bool is_shortcut = false;
-  if (auto it = bcd.shortcuts_.find(from.get_node()); it != bcd.shortcuts_.end()) {
-    for (auto const& sc : it->second) {
-      if (sc.target == to.get_node()) { is_shortcut = true; break; }
-    }
-  }
-
-  // Always create a placeholder segment (no verification).
-  auto& segment = segments.emplace_back();
-  segment.way_ = way_idx_t::invalid();
-  segment.cost_ = expected_cost;
-
-  // Use expected_cost as a simple, consistent distance stand-in so outputs are stable.
-  segment.dist_ = static_cast<distance_t>(expected_cost);
-
-  // Minimal metadata (levels/mode/ends help keep downstream happy)
-  segment.mode_ = from.get_mode();
-  segment.from_level_ = level_t{};
-  segment.to_level_ = level_t{};
-  segment.from_ = from.get_node();
-  segment.to_ = to.get_node();
-
-  // Optionally tag via two points so any consumer can draw a straight line.
-  // (Polyline is optional; leave empty to keep memory down.)
-
-  (void)is_shortcut; // currently unused (kept for future unpacking)
-
-  return static_cast<double>(segment.dist_);
-}
-
-// ... [reconstruct_bidirectional_car_dijkstra stays the same except it calls add_path_ch] ...
-
-// The rest of route.cc is unchanged
-
-
-
 path reconstruct_bidirectional_car_dijkstra(ways const& w,
                                            lookup const& l,
                                            bitvec<node_idx_t> const* blocked,
@@ -415,8 +361,8 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
       auto const expected_cost = static_cast<cost_t>(
           e.cost(forward_n) - bcd.template get_cost<direction::kForward>(*pred));
       forward_dist +=
-          add_path_ch(w, *w.r_, blocked, sharing, elevations, bcd, *pred,
-                      forward_n, expected_cost, forward_segments, dir);
+          add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
+                        forward_n, expected_cost, forward_segments, dir);
     } else {
       break;
     }
@@ -426,27 +372,6 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   auto const& start_node_candidate =
       forward_n.get_node() == start.left_.node_ ? start.left_ : start.right_;
 
-  auto backward_segments = std::vector<path::segment>{};
-  auto backward_n = bcd.meet_point_2_;
-  auto backward_dist = 0.0;
-
-  while (true) {
-    auto const& e = bcd.cost2_.at(backward_n.get_key());
-    auto const pred = e.pred(backward_n);
-    if (pred.has_value()) {
-      auto const expected_cost =
-          static_cast<cost_t>(e.cost(backward_n) -
-                              bcd.template get_cost<direction::kBackward>(*pred));
-      backward_dist += add_path_ch(w, *w.r_, blocked, sharing, elevations, bcd,
-                                   *pred, backward_n, expected_cost,
-                                   backward_segments, opposite(dir));
-    } else {
-      break;
-    }
-    backward_n = *pred;
-  }
-
-  // Add start segment
   forward_segments.push_back(
       {.polyline_ = l.get_node_candidate_path<car>(
            start, start_node_candidate, false, from),
@@ -462,10 +387,30 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
        .dist_ = static_cast<distance_t>(start_node_candidate.dist_to_node_),
        .mode_ = forward_n.get_mode()});
 
+  auto backward_segments = std::vector<path::segment>{};
+  auto backward_n = bcd.meet_point_2_;
+  auto backward_dist = 0.0;
+
+  while (true) {
+    auto const& e = bcd.cost2_.at(backward_n.get_key());
+    auto const pred = e.pred(backward_n);
+    if (pred.has_value()) {
+
+      auto const expected_cost =
+          static_cast<cost_t>(e.cost(backward_n) -
+                              bcd.template get_cost<direction::kBackward>(*pred));
+      backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
+                                     *pred, backward_n, expected_cost,
+                                     backward_segments, opposite(dir));
+    } else {
+      break;
+    }
+    backward_n = *pred;
+  }
+
   auto const& dest_node_candidate =
       backward_n.get_node() == dest.left_.node_ ? dest.left_ : dest.right_;
 
-  // Add dest segment
   backward_segments.push_back(
       {.polyline_ = l.get_node_candidate_path<car>(
            dest, dest_node_candidate, true, to),
@@ -488,11 +433,8 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   forward_segments.insert(forward_segments.end(), backward_segments.begin(),
                           backward_segments.end());
 
-  // Calculate total distance from all segments
-  auto total_dist = start_node_candidate.dist_to_node_ + dest_node_candidate.dist_to_node_;
-  for (auto const& segment : forward_segments) {
-    total_dist += segment.dist_;
-  }
+  auto total_dist = start_node_candidate.dist_to_node_ + forward_dist +
+                    backward_dist + dest_node_candidate.dist_to_node_;
 
   auto path_elevation = elevation_storage::elevation{};
   for (auto const& segment : forward_segments) {

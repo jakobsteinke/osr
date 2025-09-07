@@ -997,7 +997,7 @@ struct bidirectional_car_dijkstra {
   }
 
   // Unpack shortcuts recursively to get the original path
-  std::vector<node> unpack_shortcut(node const& from, node const& to) const {
+  /*std::vector<node> unpack_shortcut(node const& from, node const& to) const {
     if constexpr (kDebugMaps) {
       std::cout << "Unpacking shortcut from ";
       // Note: can't print without ways reference here
@@ -1038,7 +1038,31 @@ struct bidirectional_car_dijkstra {
     
     // No shortcut found, return direct path
     return {from, to};
+  }*/
+
+  std::vector<node> unpack_shortcut(node const& from, node const& to) const {
+  car_state from_state{from.n_, from.way_, from.dir_};
+
+  // look in shortcuts, not legal edges
+  auto it = shortcut_successors_.find(from_state);
+  if (it == shortcut_successors_.end()) {
+    return {from, to};
   }
+
+  car_state to_state{to.n_, to.way_, to.dir_};
+  for (auto const& edge : it->second) {
+    car_state target_state{edge.target.n_, edge.target.way_, edge.target.dir_};
+    if (target_state == to_state && edge.middle_node.has_value()) {
+      auto const& m = *edge.middle_node;
+      auto left  = unpack_shortcut(from, m);
+      auto right = unpack_shortcut(m, to);
+      left.insert(left.end(), right.begin() + 1, right.end());
+      return left;
+    }
+  }
+  return {from, to};
+}
+
 
   // Public interface for CH preprocessing
   void enable_contraction_hierarchies(ways const& w,

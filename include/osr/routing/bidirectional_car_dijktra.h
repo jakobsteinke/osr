@@ -487,8 +487,8 @@ struct bidirectional_car_dijkstra {
         continue;
       }
       
-      // Expand neighbors (only to higher level nodes for CH)
-      auto const current_level = node_levels_[current];
+      // Expand neighbors (only to nodes with level > contracted node level)
+      auto const u_level = node_levels_[contracted_node];
       
       // Build adjacency if not cached
       if (legal_successors_.find(current) == legal_successors_.end()) {
@@ -503,8 +503,8 @@ struct bidirectional_car_dijkstra {
         for (auto const& edge : adj_it->second) {
           car_state neighbor{edge.target.n_, edge.target.way_, edge.target.dir_};
           
-          // CH constraint: only expand to higher level nodes
-          if (node_levels_[neighbor] <= current_level) {
+          // CH constraint: only expand to nodes with level > contracted node level
+          if (node_levels_[neighbor] <= u_level) {
             continue;
           }
           
@@ -524,8 +524,8 @@ struct bidirectional_car_dijkstra {
         for (auto const& shortcut : shortcut_it->second) {
           car_state neighbor{shortcut.target.n_, shortcut.target.way_, shortcut.target.dir_};
           
-          // CH constraint: only expand to higher level nodes
-          if (node_levels_[neighbor] <= current_level) {
+          // CH constraint: only expand to nodes with level > contracted node level
+          if (node_levels_[neighbor] <= u_level) {
             continue;
           }
           

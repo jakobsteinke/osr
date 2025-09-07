@@ -22,6 +22,7 @@
 #include "osr/routing/profile.h"
 #include "osr/routing/profiles/car.h"
 #include "osr/routing/route.h"
+#include "osr/routing/bidirectional_car_dijktra.h"
 #include "osr/types.h"
 #include "osr/ways.h"
 
@@ -32,6 +33,7 @@ constexpr auto const kUseMultithreading = true;
 constexpr auto const kPrintDebugGeojson = true;
 constexpr auto const kMaxMatchDistance = 100;
 constexpr auto const kMaxAllowedPathDifferenceRatio = 0.5;
+constexpr auto const kEnableCH = true;  // Enable Contraction Hierarchies
 
 void load(std::string_view raw_data, std::string_view data_dir) {
   if (!fs::exists(data_dir)) {
@@ -49,6 +51,17 @@ void run(ways const& w,
          lookup const& l,
          unsigned const n_samples,
          unsigned const max_cost) {
+
+  // Enable CH preprocessing if requested
+  if constexpr (kEnableCH) {
+    fmt::println("Enabling Contraction Hierarchies preprocessing...");
+    auto& bcd = osr::get_bidirectional_car_dijkstra();
+    auto const start_time = std::chrono::steady_clock::now();
+    bcd.enable_contraction_hierarchies(w, *w.r_);
+    auto const end_time = std::chrono::steady_clock::now();
+    auto const preprocessing_time = std::chrono::duration_cast<std::chrono::milliseconds>(end_time - start_time);
+    fmt::println("CH preprocessing completed in {} ms", preprocessing_time.count());
+  }
 
   auto const from_tos = [&]() {
     auto prng = std::mt19937{};

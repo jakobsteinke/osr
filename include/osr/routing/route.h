@@ -23,6 +23,8 @@ struct dijkstra;
 template <typename Profile>
 struct bidirectional;
 
+struct bidirectional_car_dijkstra;
+
 struct sharing_data;
 
 struct path {
@@ -112,5 +114,7 @@ std::optional<path> route(ways const& w,
                           sharing_data const* sharing = nullptr,
                           elevation_storage const* = nullptr,
                           routing_algorithm = routing_algorithm::kDijkstra);
+
+bidirectional_car_dijkstra& get_bidirectional_car_dijkstra();
 
 }  // namespace osr

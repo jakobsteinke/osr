@@ -803,7 +803,7 @@ struct bidirectional_car_dijkstra {
                            target_level, curr_level, 
                            SearchDir == direction::kForward ? "FWD" : "BWD");
               }
-              //continue;
+              continue;
             } else {
               if constexpr (kDebugMaps) {
                 fmt::println("  CH ALLOW: target level {} > curr level {} (SearchDir={})", 

@@ -125,17 +125,21 @@ void run(ways const& w,
     auto const experiment_time =
         std::chrono::steady_clock::now() - experiment_start;
 
-    // Log the cost comparison for every route
+    // Log the cost comparison for every route with times
     if (reference.has_value() && experiment.has_value()) {
-      fmt::println("Route {:11} --> {:11}: dijkstra cost={}, bidir_ch cost={}, match={}",
+      fmt::println("Route {:11} --> {:11}: dijkstra cost={}, bidir_ch cost={}, match={} | dijkstra time: {}ms, bidir_ch time: {}ms",
                    w.node_to_osm_[from_node], w.node_to_osm_[to_node],
                    reference->cost_, experiment->cost_,
-                   reference->cost_ == experiment->cost_ ? "YES" : "NO");
+                   reference->cost_ == experiment->cost_ ? "YES" : "NO",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(reference_time).count(),
+                   std::chrono::duration_cast<std::chrono::milliseconds>(experiment_time).count());
     } else if (reference.has_value() != experiment.has_value()) {
-      fmt::println("Route {:11} --> {:11}: dijkstra={}, bidir_ch={}, match=NO (different existence)",
+      fmt::println("Route {:11} --> {:11}: dijkstra={}, bidir_ch={}, match=NO (different existence) | dijkstra time: {}ms, bidir_ch time: {}ms",
                    w.node_to_osm_[from_node], w.node_to_osm_[to_node],
                    reference.has_value() ? "found" : "not_found",
-                   experiment.has_value() ? "found" : "not_found");
+                   experiment.has_value() ? "found" : "not_found",
+                   std::chrono::duration_cast<std::chrono::milliseconds>(reference_time).count(),
+                   std::chrono::duration_cast<std::chrono::milliseconds>(experiment_time).count());
     }
 
     if (reference.has_value() != experiment.has_value() ||
@@ -205,6 +209,23 @@ void run(ways const& w,
 TEST(dijkstra_astarbidir, monaco) {
   auto const raw_data = "test/monaco.osm.pbf";
   auto const data_dir = "test/monaco";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  run(w, l, num_samples, max_cost);
+}
+
+TEST(dijkstra_astarbidir, tokelau) {
+  auto const raw_data = "test/tokelau-250905.osm.pbf";
+  auto const data_dir = "test/tokelau";
   auto const num_samples = 2000U;
   auto const max_cost = 3600U;
 

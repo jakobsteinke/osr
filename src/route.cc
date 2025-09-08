@@ -736,6 +736,12 @@ std::optional<path> route_bidirectional(ways const& w,
       continue;
     }
     for (auto const [j, end] : utl::enumerate(to_match)) {
+       // ADD THIS BLOCK ↓↓↓
+        b.pq2_.clear();
+        b.cost2_.clear();
+        b.max_reached_2_ = false;
+        b.clear_mp();            // resets meet_point_1_, meet_point_2_, best_cost_
+        // ADD BLOCK ^^^^
       if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
         continue;
       }
@@ -777,9 +783,13 @@ std::optional<path> route_bidirectional(ways const& w,
                             start, end, cost, dir);
     }
     b.pq1_.clear();
+    b.cost1_.clear();
     b.pq2_.clear();
     b.cost2_.clear();
+    b.max_reached_1_ = false;
     b.max_reached_2_ = false;
+    b.clear_mp();
+
   }
   return std::nullopt;
 }
@@ -821,6 +831,12 @@ std::optional<path> route_bidirectional_car_dijkstra(ways const& w,
       continue;
     }
     for (auto const [j, end] : utl::enumerate(to_match)) {
+       // ADD THIS BLOCK ↓↓↓
+        bcd.pq2_.clear();
+        bcd.cost2_.clear();
+        bcd.max_reached_2_ = false;
+        bcd.clear_mp();            // resets meet_point_1_, meet_point_2_, best_cost_
+      // ADD BLOCK ^^^^
       if (w.r_->way_component_[start.way_] != w.r_->way_component_[end.way_]) {
         continue;
       }
@@ -858,9 +874,13 @@ std::optional<path> route_bidirectional_car_dijkstra(ways const& w,
                           start, end, cost, dir);
     }
     bcd.pq1_.clear();
+    bcd.cost1_.clear();    // <-- ADD
     bcd.pq2_.clear();
-    bcd.cost2_.clear();
-    bcd.max_reached_2_ = false;
+    bcd.cost2_.clear();    // (already present)
+    bcd.max_reached_1_ = false;  // <-- ADD
+    bcd.max_reached_2_ = false;  // (already present or keep)
+    bcd.clear_mp();               // <-- ADD (reset meetpoints/best_cost_)
+
   }
   return std::nullopt;
 }

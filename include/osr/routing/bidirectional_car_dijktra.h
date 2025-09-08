@@ -375,7 +375,7 @@ void handle_end_of_way_meetpoint(ways const& w,
   if (auto sc_it = opp_sc_map.find(curr_key); sc_it != opp_sc_map.end()) {
     try_lists(&sc_it->second);
   }
-}*/
+}
 
 // ======== Meetpoint logic at end-of-way (full: edges + shortcuts + same-vertex) ===
 template <direction SearchDir, bool WithBlocked>
@@ -532,7 +532,78 @@ void handle_end_of_way_meetpoint(ways const& w,
       }
     }
   }
+}*/
+
+// ======== Meetpoint logic (testing version: same-vertex only) ================
+// Mimics the Python CH approach: meet if both searches reached the *same OSR vertex*.
+// We scan all (way,dir) states at `curr.n_` on the opposite frontier, pick the cheapest,
+// and evaluate meetpoint with the current side's cost at `curr`.
+template <direction SearchDir, bool WithBlocked>
+void handle_end_of_way_meetpoint(ways const& /*w*/,
+                                 ways::routing const& r,
+                                 node const curr,
+                                 cost_map& /*costs*/,
+                                 bitvec<node_idx_t> const* /*blocked*/,
+                                 sharing_data const* /*sharing*/,
+                                 elevation_storage const* /*elevations*/) {
+  auto const evaluate_meetpoint = [&](cost_t c1, cost_t c2, node m1, node m2) {
+    auto const total = static_cast<cost_t>(c1 + c2);
+    if (total < best_cost_) {
+      best_cost_  = total;
+      // Keep orientation consistent with your code: meet_point_1_ is the forward-side node.
+      if constexpr (SearchDir == direction::kForward) {
+        meet_point_1_ = m1; // current side (forward) node on this vertex
+        meet_point_2_ = m2; // opposite side's best state on this vertex
+      } else {
+        meet_point_1_ = m2; // forward side is the "other" node here
+        meet_point_2_ = m1; // current side (backward) node
+      }
+    }
+  };
+
+  // Our cost on this state (curr may be any (way,dir) at this vertex)
+  auto const curr_cost = get_cost<SearchDir>(curr);
+  if (curr_cost == kInfeasible) return;
+
+  // Opposite frontier (per-vertex cost maps)
+  auto const opposite_cost_map =
+      opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
+
+  // If the opposite search has not reached this vertex at all, nothing to do.
+  // (We still need to scan all (way,dir) states, but this early check avoids work
+  // when the vertex key is completely absent.)
+  if (opposite_cost_map->find(curr.get_key()) == end(*opposite_cost_map)) {
+    // Note: cost maps are keyed by node_idx_t; the presence of the key does **not**
+    // guarantee a finite cost for any specific (way,dir) state; we’ll still scan below.
+  }
+
+  // Scan all (way,dir) states on the same vertex to find the cheapest opposite-side state.
+  cost_t best_other = kInfeasible;
+  node   best_node  = node::invalid();
+
+  auto const& ways_at_node = r.node_ways_[curr.n_];
+  for (way_pos_t wpos{0U}; wpos < ways_at_node.size(); ++wpos) {
+    for (auto d : {direction::kForward, direction::kBackward}) {
+      node alt{curr.n_, wpos, d};
+      auto it = opposite_cost_map->find(alt.get_key());
+      if (it == end(*opposite_cost_map)) {
+        continue; // opposite side never created an entry for this vertex
+      }
+      auto const c = it->second.cost(alt); // cost for this (way,dir) state
+      if (c != kInfeasible && c < best_other) {
+        best_other = c;
+        best_node  = alt;
+      }
+    }
+  }
+
+  if (best_other != kInfeasible) {
+    // Meet at the *same vertex*, with the current state's cost and the opposite side's
+    // best (way,dir) cost at this vertex. No boundary logic, no adjacency, no shortcuts.
+    evaluate_meetpoint(curr_cost, best_other, curr, best_node);
+  }
 }
+
 
 
 
@@ -1165,7 +1236,7 @@ static inline bool same_osr_vertex(car_state const& a, car_state const& b) {
           auto tl = node_levels_.find(tgt);
           if (tl == node_levels_.end() || tl->second <= curr_level) {
               //fmt::println("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-            //continue; // upward only
+            continue; // upward only
           }
 
           auto const total = curr_cost + sc.cost;

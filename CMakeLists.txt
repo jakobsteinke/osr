@@ -111,19 +111,28 @@ add_library(osr ${osr-src})
 target_include_directories(osr PUBLIC include)
 target_compile_features(osr PUBLIC cxx_std_23)
 target_compile_options(osr PRIVATE ${osr-compile-options})
+
+# MSVC needs /bigobj for huge translation units like src/route.cc
+if (MSVC)
+  target_compile_options(osr PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/bigobj>)
+  # If you prefer to limit it to a single file instead, use:
+  # set_source_files_properties(src/route.cc PROPERTIES COMPILE_OPTIONS "/bigobj")
+endif()
+
 target_link_libraries(osr
-        osmium
-        zlibstatic
-        protozero
-        expat
-        geo
-        cista
-        utl
-        tiles-import-library
-        rtree
-        unordered_dense
-        boost-thread
+  osmium
+  zlibstatic
+  protozero
+  expat
+  geo
+  cista
+  utl
+  tiles-import-library
+  rtree
+  unordered_dense
+  boost-thread
 )
+
 
 # --- MAIN ---
 add_executable(osr-extract exe/extract.cc)

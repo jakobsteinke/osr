@@ -483,3 +483,127 @@ TEST(dijkstra_astarbidir, shortcut_reconstruction) {
     }
   }
 }
+
+TEST(dijkstra_astarbidir, recursive_shortcut_reconstruction) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
+  if (w.n_nodes() >= 4) {
+    // Find four connected car states: A -> B -> C -> D
+    bidirectional_car_dijkstra::car_state state_a, state_b, state_c, state_d;
+    car::node node_a, node_b, node_c, node_d;
+    cost_t cost_ab = 0, cost_bc = 0, cost_cd = 0;
+    bool found_chain = false;
+
+    // Search for a chain A->B->C->D in the adjacency map
+    bidirectional_car_dijkstra::edge_transition edge_ab, edge_bc, edge_cd;
+    for (auto const& [key_a, transitions_a] : bidirectional_car_dijkstra::legal_successors_) {
+      if (found_chain) break;
+      
+      for (auto const& ab_edge : transitions_a) {
+        if (ab_edge.is_shortcut) continue; // Only use real edges
+        
+        bidirectional_car_dijkstra::car_state key_b{ab_edge.target.n_, ab_edge.target.way_, ab_edge.target.dir_};
+        auto it_b = bidirectional_car_dijkstra::legal_successors_.find(key_b);
+        
+        if (it_b != bidirectional_car_dijkstra::legal_successors_.end()) {
+          for (auto const& bc_edge : it_b->second) {
+            if (bc_edge.is_shortcut) continue; // Only use real edges
+            
+            bidirectional_car_dijkstra::car_state key_c{bc_edge.target.n_, bc_edge.target.way_, bc_edge.target.dir_};
+            auto it_c = bidirectional_car_dijkstra::legal_successors_.find(key_c);
+            
+            if (it_c != bidirectional_car_dijkstra::legal_successors_.end()) {
+              for (auto const& cd_edge : it_c->second) {
+                if (cd_edge.is_shortcut) continue; // Only use real edges
+                
+                // Found a chain A->B->C->D
+                state_a = key_a;
+                state_b = key_b;
+                state_c = key_c;
+                state_d = {cd_edge.target.n_, cd_edge.target.way_, cd_edge.target.dir_};
+                node_a = car::node{state_a.n, state_a.way, state_a.dir};
+                node_b = car::node{state_b.n, state_b.way, state_b.dir};
+                node_c = car::node{state_c.n, state_c.way, state_c.dir};
+                node_d = car::node{state_d.n, state_d.way, state_d.dir};
+                cost_ab = ab_edge.cost;
+                cost_bc = bc_edge.cost;
+                cost_cd = cd_edge.cost;
+                edge_ab = ab_edge;
+                edge_bc = bc_edge;
+                edge_cd = cd_edge;
+                found_chain = true;
+                break;
+              }
+            }
+            if (found_chain) break;
+          }
+        }
+        if (found_chain) break;
+      }
+    }
+
+    if (found_chain) {
+      std::cout << "Found chain: A(" << to_idx(state_a.n) << ") -> B(" << to_idx(state_b.n) 
+                << ") -> C(" << to_idx(state_c.n) << ") -> D(" << to_idx(state_d.n) 
+                << ") with costs " << cost_ab << " + " << cost_bc << " + " << cost_cd << std::endl;
+
+      // Step 1: Create first shortcut A->C via B
+      cost_t shortcut_ac_cost = cost_ab + cost_bc;
+      bidirectional_car_dijkstra::add_shortcut(state_a, state_c, state_b, shortcut_ac_cost, edge_ab, edge_bc);
+      std::cout << "Created shortcut A->C with cost " << shortcut_ac_cost << std::endl;
+      
+      // Step 2: Create second shortcut A->D via C, which will reference the first shortcut
+      cost_t shortcut_ad_cost = shortcut_ac_cost + cost_cd;
+      
+      // For the recursive shortcut A->D, we need to find the A->C shortcut transition
+      auto* ac_shortcut = bidirectional_car_dijkstra::find_shortcut(state_a, state_c, shortcut_ac_cost);
+      ASSERT_NE(ac_shortcut, nullptr) << "First shortcut A->C not found";
+      
+      bidirectional_car_dijkstra::add_shortcut(state_a, state_d, state_c, shortcut_ad_cost, *ac_shortcut, edge_cd);
+      std::cout << "Created recursive shortcut A->D with cost " << shortcut_ad_cost << std::endl;
+      
+      // Test the recursive shortcut reconstruction
+      std::vector<path::segment> path_segments;
+      try {
+        double dist = add_path_with_shortcuts(w, *w.r_, nullptr, nullptr, nullptr,
+                                            node_a, node_d, shortcut_ad_cost, path_segments, direction::kForward);
+        
+        std::cout << "Recursive shortcut reconstruction succeeded! Distance: " << dist 
+                  << ", Segments created: " << path_segments.size() << std::endl;
+                  
+        // Verify we got the correct number of segments (should be 3: A->B, B->C, C->D)
+        EXPECT_EQ(path_segments.size(), 3);
+        
+        // Verify total cost matches
+        cost_t total_cost = 0;
+        for (auto const& seg : path_segments) {
+          total_cost += seg.cost_;
+          std::cout << "  Segment cost: " << seg.cost_ << std::endl;
+        }
+        EXPECT_EQ(total_cost, shortcut_ad_cost);
+        
+        std::cout << "Recursive shortcut reconstruction test passed: " << path_segments.size() 
+                  << " segments with total cost " << total_cost << std::endl;
+                  
+      } catch (std::exception const& e) {
+        std::cout << "Recursive shortcut reconstruction failed: " << e.what() << std::endl;
+        FAIL() << "Recursive shortcut reconstruction threw exception: " << e.what();
+      }
+    } else {
+      std::cout << "Could not find a suitable A->B->C->D chain for testing" << std::endl;
+      GTEST_SKIP() << "No suitable edge chain found for recursive shortcut reconstruction test";
+    }
+  }
+}

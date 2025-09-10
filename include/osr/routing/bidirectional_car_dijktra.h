@@ -54,6 +54,72 @@ struct bidirectional_car_dijkstra {
     way_idx_t way;
     std::uint16_t from;
     std::uint16_t to;
+    
+    // Shortcut fields
+    bool is_shortcut = false;
+    car_state via_state = {node_idx_t::invalid(), way_pos_t{0}, direction::kForward};
+    
+    // Store complete edge information for reliable unpacking
+    edge_transition* first_edge = nullptr;   // Complete A->B edge info
+    edge_transition* second_edge = nullptr;  // Complete B->C edge info
+    
+    // Default constructor
+    edge_transition() = default;
+    
+    // Constructor for normal edges
+    edge_transition(node target_, cost_t cost_, distance_t dist_, way_idx_t way_, 
+                    std::uint16_t from_, std::uint16_t to_)
+      : target(target_), cost(cost_), dist(dist_), way(way_), from(from_), to(to_) {
+    }
+    
+    // Copy constructor for shortcuts
+    edge_transition(const edge_transition& other) 
+      : target(other.target), cost(other.cost), dist(other.dist), way(other.way),
+        from(other.from), to(other.to), is_shortcut(other.is_shortcut), 
+        via_state(other.via_state) {
+      // Deep copy edge pointers for shortcuts
+      if (other.first_edge) {
+        first_edge = new edge_transition(*other.first_edge);
+      }
+      if (other.second_edge) {
+        second_edge = new edge_transition(*other.second_edge);
+      }
+    }
+    
+    // Assignment operator
+    edge_transition& operator=(const edge_transition& other) {
+      if (this != &other) {
+        target = other.target;
+        cost = other.cost;
+        dist = other.dist;
+        way = other.way;
+        from = other.from;
+        to = other.to;
+        is_shortcut = other.is_shortcut;
+        via_state = other.via_state;
+        
+        // Clean up old pointers
+        delete first_edge;
+        delete second_edge;
+        first_edge = nullptr;
+        second_edge = nullptr;
+        
+        // Deep copy new pointers
+        if (other.first_edge) {
+          first_edge = new edge_transition(*other.first_edge);
+        }
+        if (other.second_edge) {
+          second_edge = new edge_transition(*other.second_edge);
+        }
+      }
+      return *this;
+    }
+    
+    // Destructor
+    ~edge_transition() {
+      delete first_edge;
+      delete second_edge;
+    }
   };
 
   using adjacency_map = ankerl::unordered_dense::map<car_state, std::vector<edge_transition>, car_state_hash>;
@@ -131,6 +197,80 @@ struct bidirectional_car_dijkstra {
         ++pred_count;
       }
     }
+  }
+
+  // Shortcut management functions
+  static void add_shortcut(car_state const& from_state,
+                          car_state const& to_state,
+                          car_state const& via_state,
+                          cost_t const total_cost,
+                          edge_transition const& first_edge,
+                          edge_transition const& second_edge) {
+    // Create shortcut edge for successors
+    edge_transition shortcut_forward;
+    shortcut_forward.target = node{to_state.n, to_state.way, to_state.dir};
+    shortcut_forward.cost = total_cost;
+    shortcut_forward.dist = 0;  // shortcuts have no physical distance
+    shortcut_forward.way = way_idx_t::invalid();  // marks as shortcut
+    shortcut_forward.from = 0;
+    shortcut_forward.to = 0;
+    shortcut_forward.is_shortcut = true;
+    shortcut_forward.via_state = via_state;
+    // Store deep copies of the edge objects
+    shortcut_forward.first_edge = new edge_transition(first_edge);
+    shortcut_forward.second_edge = new edge_transition(second_edge);
+    
+    // Create shortcut edge for predecessors  
+    edge_transition shortcut_backward;
+    shortcut_backward.target = node{from_state.n, from_state.way, from_state.dir};
+    shortcut_backward.cost = total_cost;
+    shortcut_backward.dist = 0;  // shortcuts have no physical distance
+    shortcut_backward.way = way_idx_t::invalid();  // marks as shortcut
+    shortcut_backward.from = 0;
+    shortcut_backward.to = 0;
+    shortcut_backward.is_shortcut = true;
+    shortcut_backward.via_state = via_state;
+    // Store deep copies of the edge objects (reversed for predecessors)
+    shortcut_backward.first_edge = new edge_transition(second_edge);
+    shortcut_backward.second_edge = new edge_transition(first_edge);
+    
+    // Add to adjacency maps
+    legal_successors_[from_state].push_back(shortcut_forward);
+    legal_predecessors_[to_state].push_back(shortcut_backward);
+    
+    if constexpr (kDebugMaps) {
+      std::cout << "Added shortcut: {n=" << to_idx(from_state.n) 
+                << ", way=" << static_cast<int>(from_state.way)
+                << ", dir=" << (from_state.dir == direction::kForward ? "FWD" : "BWD")
+                << "} -> {n=" << to_idx(to_state.n)
+                << ", way=" << static_cast<int>(to_state.way)
+                << ", dir=" << (to_state.dir == direction::kForward ? "FWD" : "BWD")
+                << "} via {n=" << to_idx(via_state.n)
+                << ", way=" << static_cast<int>(via_state.way)
+                << ", dir=" << (via_state.dir == direction::kForward ? "FWD" : "BWD")
+                << "} cost=" << total_cost << std::endl;
+    }
+  }
+
+  static edge_transition const* find_shortcut(car_state const& from_state,
+                                             car_state const& to_state,
+                                             cost_t const expected_cost) {
+    auto it = legal_successors_.find(from_state);
+    if (it == legal_successors_.end()) {
+      return nullptr;
+    }
+    
+    for (auto const& edge : it->second) {
+      if (edge.is_shortcut && 
+          edge.target.n_ == to_state.n &&
+          edge.target.way_ == to_state.way &&
+          edge.target.dir_ == to_state.dir &&
+          edge.cost == expected_cost) {
+        return &edge;
+      }
+    }
+    
+    return nullptr;
   }
 
   void reset(cost_t const max,

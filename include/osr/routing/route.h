@@ -113,4 +113,5 @@ std::optional<path> route(ways const& w,
                           elevation_storage const* = nullptr,
                           routing_algorithm = routing_algorithm::kDijkstra);
 
+
 }  // namespace osr

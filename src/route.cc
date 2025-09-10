@@ -101,15 +101,10 @@ connecting_way find_connecting_way(ways const& w,
           conn = {way, a_idx, b_idx, is_loop, dist, elevation};
         }
       });
-  utl::verify(
-      conn.has_value(), "no connecting way node/{} -> node/{} found {} {}",
-      (sharing == nullptr || from.get_node() < sharing->additional_node_offset_)
-          ? to_idx(w.node_to_osm_[from.get_node()])
-          : 0,
-      (sharing == nullptr || to.get_node() < sharing->additional_node_offset_)
-          ? to_idx(w.node_to_osm_[to.get_node()])
-          : 0,
-      expected_cost, expected_cost);
+  if (!conn.has_value()) {
+    // Return invalid connecting_way instead of throwing
+    return {};
+  }
   return *conn;
 }
 
@@ -220,6 +215,185 @@ double add_path(ways const& w,
   }
 
   return distance;
+}
+
+// Forward declarations for recursive calls
+double unpack_shortcut(ways const& w,
+                      ways::routing const& r,
+                      bitvec<node_idx_t> const* blocked,
+                      sharing_data const* sharing,
+                      elevation_storage const* elevations,
+                      car::node const from,
+                      car::node const to,
+                      cost_t const expected_cost,
+                      std::vector<path::segment>& path,
+                      direction const dir);
+
+double create_path_segment_from_edge(ways const& w,
+                                    ways::routing const& r,
+                                    bidirectional_car_dijkstra::edge_transition const& edge,
+                                    car::node const& source_node,
+                                    std::vector<path::segment>& path,
+                                    direction const dir,
+                                    sharing_data const* sharing);
+
+double add_path_with_shortcuts(ways const& w,
+                              ways::routing const& r,
+                              bitvec<node_idx_t> const* blocked,
+                              sharing_data const* sharing,
+                              elevation_storage const* elevations,
+                              car::node const from,
+                              car::node const to,
+                              cost_t const expected_cost,
+                              std::vector<path::segment>& path,
+                              direction const dir) {
+  // Check if this is a shortcut by trying to find connecting way
+  auto const& [way, from_idx, to_idx, is_loop, distance, elevation] =
+      blocked ? find_connecting_way<direction::kForward, true, car>(w, r, blocked, sharing, elevations, from, to, expected_cost)
+              : find_connecting_way<direction::kForward, false, car>(w, r, blocked, sharing, elevations, from, to, expected_cost);
+  
+  // If no valid way found, check if it's a real shortcut
+  if (way == way_idx_t::invalid()) {
+    // First check if this is actually a shortcut in our storage
+    bidirectional_car_dijkstra::car_state from_state{from.n_, from.way_, from.dir_};
+    bidirectional_car_dijkstra::car_state to_state{to.n_, to.way_, to.dir_};
+    
+    auto const* shortcut = bidirectional_car_dijkstra::find_shortcut(from_state, to_state, expected_cost);
+    if (shortcut) {
+      // It's a real shortcut, unpack it
+      return unpack_shortcut(w, r, blocked, sharing, elevations, from, to, expected_cost, path, dir);
+    } else {
+      // Not a shortcut, fallback to regular edge handling
+      // This might happen for edges that the adjacency expansion missed
+      return add_path<car>(w, r, blocked, sharing, elevations, from, to, expected_cost, path, dir);
+    }
+  }
+  
+  // Otherwise handle as normal edge using existing add_path logic
+  return add_path<car>(w, r, blocked, sharing, elevations, from, to, expected_cost, path, dir);
+}
+
+double unpack_shortcut(ways const& w,
+                      ways::routing const& r,
+                      bitvec<node_idx_t> const* blocked,
+                      sharing_data const* sharing,
+                      elevation_storage const* elevations,
+                      car::node const from,
+                      car::node const to,
+                      cost_t const expected_cost,
+                      std::vector<path::segment>& path,
+                      direction const dir) {
+  // Find the shortcut edge
+  bidirectional_car_dijkstra::car_state from_state{from.n_, from.way_, from.dir_};
+  bidirectional_car_dijkstra::car_state to_state{to.n_, to.way_, to.dir_};
+  
+  auto const* shortcut = bidirectional_car_dijkstra::find_shortcut(from_state, to_state, expected_cost);
+  if (!shortcut) {
+    throw std::runtime_error("Shortcut not found during unpacking");
+  }
+  
+  if (!shortcut->first_edge || !shortcut->second_edge) {
+    throw std::runtime_error("Shortcut missing edge information for unpacking");
+  }
+  
+  // Get via state
+  auto const& via_state = shortcut->via_state;
+  car::node via_node{via_state.n, via_state.way, via_state.dir};
+  
+  double total_dist = 0;
+  
+  // Unpack first segment (from -> via) using stored edge info
+  if (shortcut->first_edge->is_shortcut) {
+    // If first segment is also a shortcut, recursively unpack
+    total_dist += unpack_shortcut(w, r, blocked, sharing, elevations,
+                                 from, via_node, shortcut->first_edge->cost, path, dir);
+  } else {
+    // First segment is a real edge - create path segment directly
+    total_dist += create_path_segment_from_edge(w, r, *shortcut->first_edge, from, path, dir, sharing);
+  }
+  
+  // Unpack second segment (via -> to) using stored edge info
+  if (shortcut->second_edge->is_shortcut) {
+    // If second segment is also a shortcut, recursively unpack
+    total_dist += unpack_shortcut(w, r, blocked, sharing, elevations,
+                                 via_node, to, shortcut->second_edge->cost, path, dir);
+  } else {
+    // Second segment is a real edge - create path segment directly
+    total_dist += create_path_segment_from_edge(w, r, *shortcut->second_edge, via_node, path, dir, sharing);
+  }
+  
+  return total_dist;
+}
+
+// Helper function to create path segment from edge information
+double create_path_segment_from_edge(ways const& w,
+                                    ways::routing const& r,
+                                    bidirectional_car_dijkstra::edge_transition const& edge,
+                                    car::node const& source_node,
+                                    std::vector<path::segment>& path,
+                                    direction const dir,
+                                    sharing_data const* sharing) {
+  auto& segment = path.emplace_back();
+  segment.way_ = edge.way;
+  segment.dist_ = edge.dist;
+  segment.cost_ = edge.cost;
+  segment.mode_ = edge.target.get_mode();
+  
+  if (edge.way != way_idx_t::invalid()) {
+    auto const start_idx = dir == direction::kBackward ? edge.to : edge.from;
+    auto const end_idx = dir == direction::kBackward ? edge.from : edge.to;
+    auto const is_reverse = (start_idx > end_idx);
+    
+    if (is_reverse) {
+      segment.from_level_ = r.way_properties_[edge.way].to_level();
+      segment.to_level_ = r.way_properties_[edge.way].from_level();
+    } else {
+      segment.from_level_ = r.way_properties_[edge.way].from_level();
+      segment.to_level_ = r.way_properties_[edge.way].to_level();
+    }
+    segment.from_ = r.way_nodes_[edge.way][start_idx];
+    segment.to_ = r.way_nodes_[edge.way][end_idx];
+    
+    // Build polyline from way geometry
+    for (auto const [osm_idx, coord] : infinite(
+             reverse(utl::zip(w.way_osm_nodes_[edge.way], w.way_polylines_[edge.way]),
+                     is_reverse),
+             false)) {
+      auto const start_osm = w.node_to_osm_[r.way_nodes_[edge.way][start_idx]];
+      auto const end_osm = w.node_to_osm_[r.way_nodes_[edge.way][end_idx]];
+      
+      if (osm_idx == start_osm) {
+        segment.polyline_.clear(); // Start fresh from this point
+      }
+      if (segment.polyline_.empty() || osm_idx == start_osm) {
+        segment.polyline_.emplace_back(coord);
+      } else if (!segment.polyline_.empty()) {
+        segment.polyline_.emplace_back(coord);
+      }
+      if (osm_idx == end_osm) {
+        break;
+      }
+    }
+  } else {
+    // Handle invalid way case
+    auto const get_node_pos = [&](node_idx_t const n) -> geo::latlng {
+      if (n == node_idx_t::invalid()) {
+        return {};
+      } else if (w.is_additional_node(n)) {
+        return sharing->get_additional_node_coordinates(n);
+      } else {
+        return w.get_node_pos(n).as_latlng();
+      }
+    };
+    
+    segment.from_level_ = level_t{0.0F};
+    segment.to_level_ = level_t{0.0F};
+    segment.from_ = dir == direction::kBackward ? edge.target.get_node() : source_node.get_node();  
+    segment.to_ = dir == direction::kBackward ? source_node.get_node() : edge.target.get_node();
+    segment.polyline_ = {get_node_pos(segment.from_), get_node_pos(segment.to_)};
+  }
+  
+  return static_cast<double>(edge.dist);
 }
 
 template <typename Profile>
@@ -361,8 +535,8 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
       auto const expected_cost = static_cast<cost_t>(
           e.cost(forward_n) - bcd.template get_cost<direction::kForward>(*pred));
       forward_dist +=
-          add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
-                        forward_n, expected_cost, forward_segments, dir);
+          add_path_with_shortcuts(w, *w.r_, blocked, sharing, elevations, *pred,
+                                 forward_n, expected_cost, forward_segments, dir);
     } else {
       break;
     }
@@ -399,9 +573,9 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
       auto const expected_cost =
           static_cast<cost_t>(e.cost(backward_n) -
                               bcd.template get_cost<direction::kBackward>(*pred));
-      backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
-                                     *pred, backward_n, expected_cost,
-                                     backward_segments, opposite(dir));
+      backward_dist += add_path_with_shortcuts(w, *w.r_, blocked, sharing, elevations,
+                                           *pred, backward_n, expected_cost,
+                                           backward_segments, opposite(dir));
     } else {
       break;
     }

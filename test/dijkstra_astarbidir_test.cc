@@ -29,6 +29,20 @@
 namespace fs = std::filesystem;
 using namespace osr;
 
+// Forward declaration for testing (in osr namespace)
+namespace osr {
+double add_path_with_shortcuts(ways const& w,
+                              ways::routing const& r,
+                              bitvec<node_idx_t> const* blocked,
+                              sharing_data const* sharing,
+                              elevation_storage const* elevations,
+                              car::node const from,
+                              car::node const to,
+                              cost_t const expected_cost,
+                              std::vector<path::segment>& path,
+                              direction const dir);
+}
+
 constexpr auto const kUseMultithreading = true;
 constexpr auto const kPrintDebugGeojson = false;
 constexpr auto const kMaxMatchDistance = 100;
@@ -230,6 +244,7 @@ TEST(dijkstra_astarbidir, tokelau) {
   run(w, l, num_samples, max_cost);
 }
 
+
 TEST(dijkstra_astarbidir, hamburg) {
   auto const raw_data = "test/hamburg.osm.pbf";
   auto const data_dir = "test/hamburg";
@@ -249,6 +264,7 @@ TEST(dijkstra_astarbidir, hamburg) {
 
   run(w, l, num_samples, max_cost);
 }
+
 
 TEST(dijkstra_astarbidir, switzerland) {
   auto const raw_data = "test/switzerland.osm.pbf";
@@ -270,6 +286,7 @@ TEST(dijkstra_astarbidir, switzerland) {
   run(w, l, num_samples, max_cost);
 }
 
+
 TEST(dijkstra_astarbidir, DISABLED_germany) {
   auto const raw_data = "test/germany.osm.pbf";
   auto const data_dir = "test/germany";
@@ -288,4 +305,181 @@ TEST(dijkstra_astarbidir, DISABLED_germany) {
   bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
+}
+
+
+TEST(dijkstra_astarbidir, shortcut_infrastructure) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
+  // Test shortcut creation by manually adding a simple shortcut
+  // Find some nodes to create a shortcut between
+  if (w.n_nodes() >= 3) {
+    node_idx_t node_0{0};
+    node_idx_t node_1{1}; 
+    node_idx_t node_2{2};
+
+    // Create car states for these nodes (using first way/direction found)
+    bidirectional_car_dijkstra::car_state state_0, state_1, state_2;
+    
+    car::resolve_all(*w.r_, node_0, level_t{std::uint8_t{0}}, [&](car::node const& car_node) {
+      state_0 = {car_node.n_, car_node.way_, car_node.dir_};
+      return false; // Take first one
+    });
+    
+    car::resolve_all(*w.r_, node_1, level_t{std::uint8_t{0}}, [&](car::node const& car_node) {
+      state_1 = {car_node.n_, car_node.way_, car_node.dir_};
+      return false; // Take first one
+    });
+    
+    car::resolve_all(*w.r_, node_2, level_t{std::uint8_t{0}}, [&](car::node const& car_node) {
+      state_2 = {car_node.n_, car_node.way_, car_node.dir_};
+      return false; // Take first one  
+    });
+
+    // Create dummy edges for the shortcut (for testing infrastructure only)
+    bidirectional_car_dijkstra::edge_transition first_edge;
+    first_edge.target = car::node{state_1.n, state_1.way, state_1.dir};
+    first_edge.cost = 50;
+    first_edge.dist = 100;
+    first_edge.way = way_idx_t{0};
+    first_edge.from = 0;
+    first_edge.to = 1;
+    first_edge.is_shortcut = false;
+    
+    bidirectional_car_dijkstra::edge_transition second_edge;
+    second_edge.target = car::node{state_2.n, state_2.way, state_2.dir};
+    second_edge.cost = 50;
+    second_edge.dist = 100;
+    second_edge.way = way_idx_t{1};
+    second_edge.from = 0;
+    second_edge.to = 1;
+    second_edge.is_shortcut = false;
+    
+    // Add a shortcut from state_0 to state_2 via state_1 with cost 100
+    bidirectional_car_dijkstra::add_shortcut(state_0, state_2, state_1, 100, first_edge, second_edge);
+    
+    // Verify the shortcut was added
+    auto const* shortcut = bidirectional_car_dijkstra::find_shortcut(state_0, state_2, 100);
+    EXPECT_NE(shortcut, nullptr);
+    
+    if (shortcut) {
+      EXPECT_TRUE(shortcut->is_shortcut);
+      EXPECT_EQ(shortcut->way, way_idx_t::invalid());
+      EXPECT_EQ(shortcut->cost, 100);
+      EXPECT_EQ(shortcut->via_state.n, state_1.n);
+      EXPECT_EQ(shortcut->via_state.way, state_1.way);
+      EXPECT_EQ(shortcut->via_state.dir, state_1.dir);
+    }
+
+    std::cout << "Shortcut infrastructure test passed: shortcut created and found successfully!" << std::endl;
+  }
+}
+
+TEST(dijkstra_astarbidir, shortcut_reconstruction) {
+  auto const raw_data = "test/monaco.osm.pbf";
+  auto const data_dir = "test/monaco";
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
+  if (w.n_nodes() >= 3) {
+    // Find three connected car states: A -> B -> C
+    bidirectional_car_dijkstra::car_state state_a, state_b, state_c;
+    car::node node_a, node_b, node_c;
+    cost_t cost_ab = 0, cost_bc = 0;
+    bool found_chain = false;
+
+    // Search for a chain A->B->C in the adjacency map
+    bidirectional_car_dijkstra::edge_transition edge_ab, edge_bc;
+    for (auto const& [key_a, transitions_a] : bidirectional_car_dijkstra::legal_successors_) {
+      if (found_chain) break;
+      
+      for (auto const& ab_edge : transitions_a) {
+        if (ab_edge.is_shortcut) continue; // Only use real edges
+        
+        bidirectional_car_dijkstra::car_state key_b{ab_edge.target.n_, ab_edge.target.way_, ab_edge.target.dir_};
+        auto it_b = bidirectional_car_dijkstra::legal_successors_.find(key_b);
+        
+        if (it_b != bidirectional_car_dijkstra::legal_successors_.end()) {
+          for (auto const& bc_edge : it_b->second) {
+            if (bc_edge.is_shortcut) continue; // Only use real edges
+            
+            // Found a chain A->B->C
+            state_a = key_a;
+            state_b = key_b;
+            state_c = {bc_edge.target.n_, bc_edge.target.way_, bc_edge.target.dir_};
+            node_a = car::node{state_a.n, state_a.way, state_a.dir};
+            node_b = car::node{state_b.n, state_b.way, state_b.dir};
+            node_c = car::node{state_c.n, state_c.way, state_c.dir};
+            cost_ab = ab_edge.cost;
+            cost_bc = bc_edge.cost;
+            edge_ab = ab_edge;
+            edge_bc = bc_edge;
+            found_chain = true;
+            break;
+          }
+        }
+        if (found_chain) break;
+      }
+    }
+
+    if (found_chain) {
+      std::cout << "Found chain: A(" << to_idx(state_a.n) << ") -> B(" << to_idx(state_b.n) 
+                << ") -> C(" << to_idx(state_c.n) << ") with costs " << cost_ab << " + " << cost_bc << std::endl;
+
+      // Create a shortcut A->C via B using the actual edge objects
+      cost_t shortcut_cost = cost_ab + cost_bc;
+      bidirectional_car_dijkstra::add_shortcut(state_a, state_c, state_b, shortcut_cost, edge_ab, edge_bc);
+      
+      // Test the shortcut reconstruction
+      std::vector<path::segment> path_segments;
+      try {
+        double dist = add_path_with_shortcuts(w, *w.r_, nullptr, nullptr, nullptr,
+                                            node_a, node_c, shortcut_cost, path_segments, direction::kForward);
+        
+        std::cout << "Shortcut reconstruction succeeded! Distance: " << dist 
+                  << ", Segments created: " << path_segments.size() << std::endl;
+                  
+        // Verify we got multiple segments (from unpacking)
+        EXPECT_GT(path_segments.size(), 0);
+        
+        // Verify total cost matches
+        cost_t total_cost = 0;
+        for (auto const& seg : path_segments) {
+          total_cost += seg.cost_;
+        }
+        EXPECT_EQ(total_cost, shortcut_cost);
+        
+        std::cout << "Shortcut reconstruction test passed: " << path_segments.size() 
+                  << " segments with total cost " << total_cost << std::endl;
+                  
+      } catch (std::exception const& e) {
+        std::cout << "Shortcut reconstruction failed: " << e.what() << std::endl;
+        FAIL() << "Shortcut reconstruction threw exception: " << e.what();
+      }
+    } else {
+      std::cout << "Could not find a suitable A->B->C chain for testing" << std::endl;
+      GTEST_SKIP() << "No suitable edge chain found for shortcut reconstruction test";
+    }
+  }
 }

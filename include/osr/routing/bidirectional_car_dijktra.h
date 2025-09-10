@@ -566,8 +566,8 @@ struct bidirectional_car_dijkstra {
 
   dial<label, get_bucket> pq1_{get_bucket{}};
   dial<label, get_bucket> pq2_{get_bucket{}};
-  location start_loc_;
-  location end_loc_;
+  location start_loc_; // not used
+  location end_loc_; // not used
   node meet_point_1_;
   node meet_point_2_;
   cost_t best_cost_;

@@ -218,8 +218,8 @@ TEST(dijkstra_astarbidir, monaco) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -238,8 +238,8 @@ TEST(dijkstra_astarbidir, tokelau) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -259,8 +259,8 @@ TEST(dijkstra_astarbidir, hamburg) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -280,8 +280,8 @@ TEST(dijkstra_astarbidir, switzerland) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -301,8 +301,8 @@ TEST(dijkstra_astarbidir, DISABLED_germany) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -320,8 +320,8 @@ TEST(dijkstra_astarbidir, shortcut_infrastructure) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   // Test shortcut creation by manually adding a simple shortcut
   // Find some nodes to create a shortcut between
@@ -399,8 +399,8 @@ TEST(dijkstra_astarbidir, shortcut_reconstruction) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   if (w.n_nodes() >= 3) {
     // Find three connected car states: A -> B -> C
@@ -496,8 +496,8 @@ TEST(dijkstra_astarbidir, recursive_shortcut_reconstruction) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
-  // Preprocess adjacency for bidirectional car dijkstra
-  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+  // Preprocess (adjacency + CH) for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
 
   if (w.n_nodes() >= 4) {
     // Find four connected car states: A -> B -> C -> D

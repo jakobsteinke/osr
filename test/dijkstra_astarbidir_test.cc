@@ -18,6 +18,7 @@
 #include "osr/location.h"
 #include "osr/lookup.h"
 #include "osr/routing/bidirectional.h"
+#include "osr/routing/bidirectional_car_dijktra.h"
 #include "osr/routing/dijkstra.h"
 #include "osr/routing/profile.h"
 #include "osr/routing/profiles/car.h"
@@ -29,7 +30,7 @@ namespace fs = std::filesystem;
 using namespace osr;
 
 constexpr auto const kUseMultithreading = true;
-constexpr auto const kPrintDebugGeojson = true;
+constexpr auto const kPrintDebugGeojson = false;
 constexpr auto const kMaxMatchDistance = 100;
 constexpr auto const kMaxAllowedPathDifferenceRatio = 0.5;
 
@@ -203,6 +204,9 @@ TEST(dijkstra_astarbidir, monaco) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
   run(w, l, num_samples, max_cost);
 }
 
@@ -219,6 +223,9 @@ TEST(dijkstra_astarbidir, tokelau) {
   load(raw_data, data_dir);
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }
@@ -237,6 +244,9 @@ TEST(dijkstra_astarbidir, hamburg) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
   run(w, l, num_samples, max_cost);
 }
 
@@ -254,6 +264,9 @@ TEST(dijkstra_astarbidir, switzerland) {
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
+
   run(w, l, num_samples, max_cost);
 }
 
@@ -270,6 +283,9 @@ TEST(dijkstra_astarbidir, DISABLED_germany) {
   load(raw_data, data_dir);
   auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess adjacency for bidirectional car dijkstra
+  bidirectional_car_dijkstra::preprocess_adjacency(w, *w.r_);
 
   run(w, l, num_samples, max_cost);
 }

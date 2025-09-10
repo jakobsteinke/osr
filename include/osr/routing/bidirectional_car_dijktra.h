@@ -71,6 +71,68 @@ struct bidirectional_car_dijkstra {
     best_cost_ = kInfeasible;
   }
 
+  static void preprocess_adjacency(ways const& w,
+                                   ways::routing const& r,
+                                   bitvec<node_idx_t> const* blocked = nullptr,
+                                   sharing_data const* sharing = nullptr,
+                                   elevation_storage const* elevations = nullptr) {
+    legal_successors_.clear();
+    legal_predecessors_.clear();
+    
+    if constexpr (kDebugMaps) {
+      std::cout << "Starting adjacency preprocessing for " << w.n_nodes() << " nodes...\n";
+    }
+    
+    // Enumerate all nodes in the graph
+    for (auto n = node_idx_t{0}; n < node_idx_t{w.n_nodes()}; ++n) {
+      // For each node, get all valid car node states (node_idx_t, way_pos_t, direction)
+      car::resolve_all(r, n, level_t{std::uint8_t{0}}, [&](node const car_node) {
+        // Build adjacency for both search directions
+        build_adjacency_for_node_static<direction::kForward>(w, r, car_node, blocked, sharing, elevations);
+        build_adjacency_for_node_static<direction::kBackward>(w, r, car_node, blocked, sharing, elevations);
+      });
+    }
+    
+    if constexpr (kDebugMaps) {
+      std::cout << "Adjacency preprocessing completed: " 
+                << legal_successors_.size() << " successor entries, "
+                << legal_predecessors_.size() << " predecessor entries\n";
+    }
+    
+    if constexpr (kDebugMaps) {
+      // Print sample entries for debugging
+      std::cout << "\nSample successor entries:\n";
+      auto succ_count = 0;
+      for (auto const& [key, transitions] : legal_successors_) {
+        if (succ_count >= 5) break;
+        std::cout << "  Key {n=" << to_idx(key.n) << ", way=" << static_cast<int>(key.way) 
+                  << ", dir=" << (key.dir == direction::kForward ? "FWD" : "BWD") 
+                  << "} -> " << transitions.size() << " transitions\n";
+        for (auto const& t : transitions) {
+          std::cout << "    -> n=" << to_idx(t.target.n_) << ", way=" << static_cast<int>(t.target.way_)
+                    << ", dir=" << (t.target.dir_ == direction::kForward ? "FWD" : "BWD") 
+                    << ", cost=" << t.cost << "\n";
+        }
+        ++succ_count;
+      }
+      
+      std::cout << "\nSample predecessor entries:\n";
+      auto pred_count = 0;
+      for (auto const& [key, transitions] : legal_predecessors_) {
+        if (pred_count >= 5) break;
+        std::cout << "  Key {n=" << to_idx(key.n) << ", way=" << static_cast<int>(key.way) 
+                  << ", dir=" << (key.dir == direction::kForward ? "FWD" : "BWD") 
+                  << "} -> " << transitions.size() << " transitions\n";
+        for (auto const& t : transitions) {
+          std::cout << "    -> n=" << to_idx(t.target.n_) << ", way=" << static_cast<int>(t.target.way_)
+                    << ", dir=" << (t.target.dir_ == direction::kForward ? "FWD" : "BWD") 
+                    << ", cost=" << t.cost << "\n";
+        }
+        ++pred_count;
+      }
+    }
+  }
+
   void reset(cost_t const max,
              location const& start_loc,
              location const& end_loc) {
@@ -85,17 +147,30 @@ struct bidirectional_car_dijkstra {
     end_loc_ = end_loc;
     max_reached_1_ = false;
     max_reached_2_ = false;
-    legal_successors_.clear();
-    legal_predecessors_.clear();
+    // NOTE: Do NOT clear static adjacency maps - they persist across searches
+  }
+
+  template <direction SearchDir>
+  static void build_adjacency_for_node_static(ways const& w,
+                                               ways::routing const& r,
+                                               node const n,
+                                               bitvec<node_idx_t> const* blocked,
+                                               sharing_data const* sharing,
+                                               elevation_storage const* elevations) {
+    if (blocked != nullptr) {
+      build_adjacency_for_node_impl<SearchDir, true>(w, r, n, blocked, sharing, elevations);
+    } else {
+      build_adjacency_for_node_impl<SearchDir, false>(w, r, n, blocked, sharing, elevations);
+    }
   }
 
   template <direction SearchDir, bool WithBlocked>
-  void build_adjacency_for_node(ways const& w,
-                                ways::routing const& r,
-                                node const n,
-                                bitvec<node_idx_t> const* blocked,
-                                sharing_data const* sharing,
-                                elevation_storage const* elevations) {
+  static void build_adjacency_for_node_impl(ways const& w,
+                                             ways::routing const& r,
+                                             node const n,
+                                             bitvec<node_idx_t> const* blocked,
+                                             sharing_data const* sharing,
+                                             elevation_storage const* elevations) {
     car_state source_key{n.n_, n.way_, n.dir_};
     
     if constexpr (kDebugMaps) {
@@ -136,11 +211,28 @@ struct bidirectional_car_dijkstra {
     
     if constexpr (kDebugMaps) {
       auto const& map = (SearchDir == direction::kForward) ? legal_successors_ : legal_predecessors_;
-      std::cout << "Stored " << map.at(source_key).size() << " transitions in " 
-                << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
-                << " map\n";
+      auto it = map.find(source_key);
+      if (it != map.end()) {
+        std::cout << "Stored " << it->second.size() << " transitions in " 
+                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
+                  << " map\n";
+      } else {
+        std::cout << "Stored 0 transitions in " 
+                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
+                  << " map\n";
+      }
       std::cout << "=================================\n";
     }
+  }
+
+  template <direction SearchDir, bool WithBlocked>
+  void build_adjacency_for_node(ways const& w,
+                                ways::routing const& r,
+                                node const n,
+                                bitvec<node_idx_t> const* blocked,
+                                sharing_data const* sharing,
+                                elevation_storage const* elevations) {
+    build_adjacency_for_node_impl<SearchDir, WithBlocked>(w, r, n, blocked, sharing, elevations);
   }
 
   void add(ways const& w,
@@ -251,11 +343,6 @@ struct bidirectional_car_dijkstra {
         car_state curr_key{curr.n_, curr.way_, curr.dir_};
         auto const& opp_adj_map = (opposite(SearchDir) == direction::kForward) ? legal_successors_ : legal_predecessors_;
         
-        // Build adjacency if not already cached
-        if (opp_adj_map.find(curr_key) == opp_adj_map.end()) {
-          build_adjacency_for_node<opposite(SearchDir), WithBlocked>(w, r, curr, blocked, sharing, elevations);
-        }
-        
         auto opp_it = opp_adj_map.find(curr_key);
         if (opp_it != opp_adj_map.end()) {
           for (auto const& edge : opp_it->second) {
@@ -308,13 +395,24 @@ struct bidirectional_car_dijkstra {
                   elevation_storage const* elevations,
                   dial<label, get_bucket>& pq,
                   cost_map& costs) {
-    if (pq.empty()) return true;
+    if (pq.empty()) {
+      return true;
+    }
 
     auto const l = pq.pop();
     auto const curr = l.get_node();
     auto const curr_cost = get_cost<SearchDir>(curr);
     
+    if constexpr (kDebugMaps) {
+      std::cout << "  EXTRACT ";
+      l.get_node().print(std::cout, w);
+      std::cout << " with cost=" << l.cost() << " (actual_cost=" << curr_cost << ")\n";
+    }
+    
     if (curr_cost < l.cost()) {
+      if constexpr (kDebugMaps) {
+        std::cout << "  Skipping due to dominated cost\n";
+      }
       return true;
     }
     
@@ -328,13 +426,21 @@ struct bidirectional_car_dijkstra {
     car_state curr_key{curr.n_, curr.way_, curr.dir_};
     auto const& adj_map = (SearchDir == direction::kForward) ? legal_successors_ : legal_predecessors_;
     
-    // If not in map, need to build adjacency for this node
-    if (adj_map.find(curr_key) == adj_map.end()) {
-      build_adjacency_for_node<SearchDir, WithBlocked>(w, r, curr, blocked, sharing, elevations);
+    auto it = adj_map.find(curr_key);
+    if constexpr (kDebugMaps) {
+      std::cout << "  Looking up adjacency for key {n=" << to_idx(curr_key.n) 
+                << ", way=" << static_cast<int>(curr_key.way) 
+                << ", dir=" << (curr_key.dir == direction::kForward ? "FWD" : "BWD") 
+                << "} in " << (SearchDir == direction::kForward ? "successors" : "predecessors") << "\n";
+      
+      if (it == adj_map.end()) {
+        std::cout << "  WARNING: No adjacency found for this key!\n";
+      } else {
+        std::cout << "  Found " << it->second.size() << " adjacent transitions\n";
+      }
     }
     
     if constexpr (kDebugMaps) {
-      auto it = adj_map.find(curr_key);
       if (it != adj_map.end() && !it->second.empty()) {
         std::cout << "\n>>> Using adjacency map for ";
         curr.print(std::cout, w);
@@ -347,8 +453,6 @@ struct bidirectional_car_dijkstra {
         }
       }
     }
-    
-    auto it = adj_map.find(curr_key);
     if (it != adj_map.end()) {
       for (auto const& edge : it->second) {
         if constexpr (kDebug) {
@@ -411,16 +515,23 @@ struct bidirectional_car_dijkstra {
            bitvec<node_idx_t> const* blocked,
            sharing_data const* sharing,
            elevation_storage const* elevations) {
+    if constexpr (kDebugMaps) {
+      std::cout << "\n=== Starting bidirectional search with max_cost=" << max << " ===\n";
+      std::cout << "Initial PQ sizes: pq1=" << pq1_.size() << ", pq2=" << pq2_.size() << "\n";
+    }
+    
     while (!pq1_.empty() || !pq2_.empty()) {
-      if (!pq1_.empty() &&
-          !run_single<SearchDir, WithBlocked>(w, r, max, blocked, sharing,
-                                              elevations, pq1_, cost1_)) {
-        break;
+      if (!pq1_.empty()) {
+        if (!run_single<SearchDir, WithBlocked>(w, r, max, blocked, sharing,
+                                                elevations, pq1_, cost1_)) {
+          break;
+        }
       }
-      if (!pq2_.empty() &&
-          !run_single<opposite(SearchDir), WithBlocked>(
+      if (!pq2_.empty()) {
+        if (!run_single<opposite(SearchDir), WithBlocked>(
               w, r, max, blocked, sharing, elevations, pq2_, cost2_)) {
-        break;
+          break;
+        }
       }
     }
     
@@ -464,8 +575,12 @@ struct bidirectional_car_dijkstra {
   cost_map cost2_;
   bool max_reached_1_;
   bool max_reached_2_;
-  adjacency_map legal_successors_;
-  adjacency_map legal_predecessors_;
+  static adjacency_map legal_successors_;
+  static adjacency_map legal_predecessors_;
 };
+
+// Static member definitions
+inline bidirectional_car_dijkstra::adjacency_map bidirectional_car_dijkstra::legal_successors_;
+inline bidirectional_car_dijkstra::adjacency_map bidirectional_car_dijkstra::legal_predecessors_;
 
 }  // namespace osr

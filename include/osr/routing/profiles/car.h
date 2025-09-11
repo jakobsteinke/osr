@@ -214,6 +214,40 @@ struct car {
 
       ++way_pos;
     }
+
+    // Same node_idx_t expansions: transitions between different ways at the same node
+    auto from_way_pos = way_pos_t{0U};
+    for (auto const from_way : w.node_ways_[n.n_]) {
+      if (from_way_pos == n.way_) {
+        ++from_way_pos;
+        continue; // Skip self-transitions
+      }
+
+      // Check if we can legally transition from current way to from_way
+      if (w.is_restricted<SearchDir>(n.n_, n.way_, from_way_pos)) {
+        ++from_way_pos;
+        continue;
+      }
+
+      // Add transitions for both directions on the target way
+      auto const target_way_prop = w.way_properties_[from_way];
+      
+      // Forward direction transition
+      if (way_cost(target_way_prop, direction::kForward, 0U) != kInfeasible) {
+        auto const target = node{n.n_, from_way_pos, direction::kForward};
+        auto const cost = 0U; // No distance cost for same-node transitions
+        fn(target, cost, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);
+      }
+
+      // Backward direction transition
+      if (way_cost(target_way_prop, direction::kBackward, 0U) != kInfeasible) {
+        auto const target = node{n.n_, from_way_pos, direction::kBackward};
+        auto const cost = 0U; // No distance cost for same-node transitions
+        fn(target, cost, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);
+      }
+
+      ++from_way_pos;
+    }
   }
 
   static bool is_dest_reachable(ways::routing const& w,

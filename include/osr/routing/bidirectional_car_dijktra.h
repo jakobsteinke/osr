@@ -448,8 +448,14 @@ private:
       std::cout << "Starting contraction of " << states_by_level.size() << " car_states...\n";
     }
     
+    // Always print the number of levels at the start
+    std::cout << "Number of levels: " << states_by_level.size() << std::endl;
+    
     size_t contracted = 0;
     for (auto const& [contracted_state, contracted_level] : states_by_level) {
+      // Always print the level of the currently contracted node
+      std::cout << "Contracting node level: " << contracted_level << " (node " << contracted + 1 << "/" << states_by_level.size() << ")" << std::endl;
+      
       contract_single_node(contracted_state, contracted_level);
       ++contracted;
       

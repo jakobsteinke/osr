@@ -62,6 +62,7 @@ struct bidirectional_car_dijkstra {
 
 
   struct edge_transition {
+    node source;
     node target;
     cost_t cost;
     distance_t dist;
@@ -81,14 +82,14 @@ struct bidirectional_car_dijkstra {
     edge_transition() = default;
     
     // Constructor for normal edges
-    edge_transition(node target_, cost_t cost_, distance_t dist_, way_idx_t way_, 
+    edge_transition(node source_, node target_, cost_t cost_, distance_t dist_, way_idx_t way_, 
                     std::uint16_t from_, std::uint16_t to_)
-      : target(target_), cost(cost_), dist(dist_), way(way_), from(from_), to(to_) {
+      : source(source_), target(target_), cost(cost_), dist(dist_), way(way_), from(from_), to(to_) {
     }
     
     // Copy constructor for shortcuts
     edge_transition(const edge_transition& other) 
-      : target(other.target), cost(other.cost), dist(other.dist), way(other.way),
+      : source(other.source), target(other.target), cost(other.cost), dist(other.dist), way(other.way),
         from(other.from), to(other.to), is_shortcut(other.is_shortcut), 
         via_state(other.via_state) {
       // Deep copy edge pointers for shortcuts
@@ -103,6 +104,7 @@ struct bidirectional_car_dijkstra {
     // Assignment operator
     edge_transition& operator=(const edge_transition& other) {
       if (this != &other) {
+        source = other.source;
         target = other.target;
         cost = other.cost;
         dist = other.dist;
@@ -167,6 +169,7 @@ struct bidirectional_car_dijkstra {
                                       elevation_storage const* elevations = nullptr) {
     legal_successors_.clear();
     legal_predecessors_.clear();
+    legal_incoming_.clear();
     
     if constexpr (kDebugMaps) {
       std::cout << "Starting adjacency preprocessing for " << w.n_nodes() << " nodes...\n";
@@ -231,6 +234,7 @@ struct bidirectional_car_dijkstra {
                           edge_transition const& second_edge) {
     // Create shortcut edge for successors
     edge_transition shortcut_forward;
+    shortcut_forward.source = node{from_state.n, from_state.way, from_state.dir};
     shortcut_forward.target = node{to_state.n, to_state.way, to_state.dir};
     shortcut_forward.cost = total_cost;
     shortcut_forward.dist = 0;  // shortcuts have no physical distance
@@ -245,6 +249,7 @@ struct bidirectional_car_dijkstra {
     
     // Create shortcut edge for predecessors  
     edge_transition shortcut_backward;
+    shortcut_backward.source = node{to_state.n, to_state.way, to_state.dir};
     shortcut_backward.target = node{from_state.n, from_state.way, from_state.dir};
     shortcut_backward.cost = total_cost;
     shortcut_backward.dist = 0;  // shortcuts have no physical distance
@@ -260,6 +265,7 @@ struct bidirectional_car_dijkstra {
     // Add to adjacency maps
     legal_successors_[from_state].push_back(shortcut_forward);
     legal_predecessors_[to_state].push_back(shortcut_backward);
+    legal_incoming_[to_state].push_back(shortcut_forward);
     
     if constexpr (kDebugMaps) {
       std::cout << "Added shortcut: {n=" << to_idx(from_state.n) 
@@ -464,10 +470,10 @@ private:
     std::vector<car_state> incoming_neighbors;
     std::vector<cost_t> incoming_costs;
     
-    auto pred_it = legal_predecessors_.find(u);
-    if (pred_it != legal_predecessors_.end()) {
-      for (auto const& edge : pred_it->second) {
-        car_state v_state{edge.target.n_, edge.target.way_, edge.target.dir_};
+    auto in_it = legal_incoming_.find(u);
+    if (in_it != legal_incoming_.end()) {
+      for (auto const& edge : in_it->second) {
+        car_state v_state{edge.source.n_, edge.source.way_, edge.source.dir_};
         if (get_level(v_state) > u_level) {
           incoming_neighbors.push_back(v_state);
           incoming_costs.push_back(edge.cost);
@@ -622,12 +628,16 @@ public:
                       << ", to=" << to << "]\n";
           }
           
+          car_state target_key{target.n_, target.way_, target.dir_};
+          
           if (SearchDir == direction::kForward) {
             // For forward search, store as successors
-            legal_successors_[source_key].push_back({target, static_cast<cost_t>(cost), dist, way, from, to});
+            legal_successors_[source_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
+            // Also add to incoming map for the target
+            legal_incoming_[target_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
           } else {
             // For backward search, store as predecessors  
-            legal_predecessors_[source_key].push_back({target, static_cast<cost_t>(cost), dist, way, from, to});
+            legal_predecessors_[source_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
           }
         });
     
@@ -968,12 +978,14 @@ public:
   bool max_reached_2_;
   static adjacency_map legal_successors_;
   static adjacency_map legal_predecessors_;
+  static adjacency_map legal_incoming_;
   static level_map car_state_levels_;
 };
 
 // Static member definitions
 inline bidirectional_car_dijkstra::adjacency_map bidirectional_car_dijkstra::legal_successors_;
 inline bidirectional_car_dijkstra::adjacency_map bidirectional_car_dijkstra::legal_predecessors_;
+inline bidirectional_car_dijkstra::adjacency_map bidirectional_car_dijkstra::legal_incoming_;
 inline bidirectional_car_dijkstra::level_map bidirectional_car_dijkstra::car_state_levels_;
 
 }  // namespace osr

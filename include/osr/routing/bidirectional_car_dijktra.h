@@ -7,6 +7,7 @@
 #include "osr/elevation_storage.h"
 #include "osr/location.h"
 #include "osr/routing/dial.h"
+#include "osr/routing/precomputed_successors.h"
 #include "osr/routing/profiles/car.h"
 #include "osr/routing/sharing_data.h"
 #include "osr/types.h"
@@ -24,6 +25,9 @@ struct bidirectional_car_dijkstra {
   using entry = car::entry;
   using hash = car::hash;
   using cost_map = ankerl::unordered_dense::map<key, entry, hash>;
+
+  explicit bidirectional_car_dijkstra(precomputed_successors const* successors = nullptr)
+      : successors_{successors} {}
 
   constexpr static auto const kDebug = false;
 
@@ -147,46 +151,97 @@ struct bidirectional_car_dijkstra {
         if (!pred.has_value()) {
           return;
         }
-        car::adjacent<opposite(SearchDir), WithBlocked>(
-            r, curr, blocked, sharing, elevations,
-            [&](node const neighbor, std::uint32_t const, distance_t,
-                way_idx_t const, std::uint16_t, std::uint16_t,
-                elevation_storage::elevation const, bool const) {
-              if (neighbor.get_key() != pred->get_key()) {
-                return;
+        if (successors_ != nullptr) {
+          // Use precomputed successors
+          auto const& successor_list = (opposite(SearchDir) == direction::kForward)
+                                           ? successors_->get_forward_successors(curr.get_key())
+                                           : successors_->get_backward_successors(curr.get_key());
+          
+          for (auto const& edge : successor_list) {
+            if constexpr (WithBlocked) {
+              if (blocked->test(edge.target.get_node())) {
+                continue;
               }
-              auto const opposite_it =
-                  opposite_cost_map->find(neighbor.get_key());
-              if (opposite_it == end(*opposite_cost_map)) {
-                return;
-              }
-              auto const opposite_curr = opposite_it->second.pred(neighbor);
-              if (!opposite_curr.has_value() ||
-                  opposite_curr->get_key() != curr.get_key()) {
-                return;
-              }
-              auto const opposite_curr_cost =
-                  opposite_candidate->second.cost(*opposite_curr);
-              auto const pred_cost = get_cost<SearchDir>(*pred);
-              auto const opposite_pred_cost =
-                  opposite_it->second.cost(neighbor);
-              auto const evaluate_meetpoint_with_potential_u_turn_cost =
-                  [&](cost_t const cost_1, cost_t const cost_2,
-                      node const meet_1, node const meet_2) {
-                    evaluate_meetpoint(
-                        cost_1, cost_2,
-                        SearchDir == direction::kForward ? meet_1 : meet_2,
-                        SearchDir == direction::kForward ? meet_2 : meet_1);
-                  };
-              if (pred_cost + opposite_pred_cost >
-                  curr_cost + opposite_curr_cost) {
-                evaluate_meetpoint_with_potential_u_turn_cost(
-                    pred_cost, opposite_pred_cost, *pred, neighbor);
-              } else {
-                evaluate_meetpoint_with_potential_u_turn_cost(
-                    curr_cost, opposite_curr_cost, curr, *opposite_curr);
-              }
-            });
+            }
+
+            if (edge.target.get_key() != pred->get_key()) {
+              continue;
+            }
+            auto const opposite_it =
+                opposite_cost_map->find(edge.target.get_key());
+            if (opposite_it == end(*opposite_cost_map)) {
+              continue;
+            }
+            auto const opposite_curr = opposite_it->second.pred(edge.target);
+            if (!opposite_curr.has_value() ||
+                opposite_curr->get_key() != curr.get_key()) {
+              continue;
+            }
+            auto const opposite_curr_cost =
+                opposite_candidate->second.cost(*opposite_curr);
+            auto const pred_cost = get_cost<SearchDir>(*pred);
+            auto const opposite_pred_cost =
+                opposite_it->second.cost(edge.target);
+            auto const evaluate_meetpoint_with_potential_u_turn_cost =
+                [&](cost_t const cost_1, cost_t const cost_2,
+                    node const meet_1, node const meet_2) {
+                  evaluate_meetpoint(
+                      cost_1, cost_2,
+                      SearchDir == direction::kForward ? meet_1 : meet_2,
+                      SearchDir == direction::kForward ? meet_2 : meet_1);
+                };
+            if (pred_cost + opposite_pred_cost >
+                curr_cost + opposite_curr_cost) {
+              evaluate_meetpoint_with_potential_u_turn_cost(
+                  pred_cost, opposite_pred_cost, *pred, edge.target);
+            } else {
+              evaluate_meetpoint_with_potential_u_turn_cost(
+                  curr_cost, opposite_curr_cost, curr, *opposite_curr);
+            }
+          }
+        } else {
+          // Fallback to original car::adjacent
+          car::adjacent<opposite(SearchDir), WithBlocked>(
+              r, curr, blocked, sharing, elevations,
+              [&](node const neighbor, std::uint32_t const, distance_t,
+                  way_idx_t const, std::uint16_t, std::uint16_t,
+                  elevation_storage::elevation const, bool const) {
+                if (neighbor.get_key() != pred->get_key()) {
+                  return;
+                }
+                auto const opposite_it =
+                    opposite_cost_map->find(neighbor.get_key());
+                if (opposite_it == end(*opposite_cost_map)) {
+                  return;
+                }
+                auto const opposite_curr = opposite_it->second.pred(neighbor);
+                if (!opposite_curr.has_value() ||
+                    opposite_curr->get_key() != curr.get_key()) {
+                  return;
+                }
+                auto const opposite_curr_cost =
+                    opposite_candidate->second.cost(*opposite_curr);
+                auto const pred_cost = get_cost<SearchDir>(*pred);
+                auto const opposite_pred_cost =
+                    opposite_it->second.cost(neighbor);
+                auto const evaluate_meetpoint_with_potential_u_turn_cost =
+                    [&](cost_t const cost_1, cost_t const cost_2,
+                        node const meet_1, node const meet_2) {
+                      evaluate_meetpoint(
+                          cost_1, cost_2,
+                          SearchDir == direction::kForward ? meet_1 : meet_2,
+                          SearchDir == direction::kForward ? meet_2 : meet_1);
+                    };
+                if (pred_cost + opposite_pred_cost >
+                    curr_cost + opposite_curr_cost) {
+                  evaluate_meetpoint_with_potential_u_turn_cost(
+                      pred_cost, opposite_pred_cost, *pred, neighbor);
+                } else {
+                  evaluate_meetpoint_with_potential_u_turn_cost(
+                      curr_cost, opposite_curr_cost, curr, *opposite_curr);
+                }
+              });
+        }
       }
     }
   }
@@ -216,43 +271,89 @@ struct bidirectional_car_dijkstra {
       std::cout << "\n";
     }
 
-    car::adjacent<SearchDir, WithBlocked>(
-        r, curr, blocked, sharing, elevations,
-        [&](node const neighbor, std::uint32_t const cost, distance_t,
-            way_idx_t const way, std::uint16_t, std::uint16_t,
-            elevation_storage::elevation const, bool const track) {
-          if constexpr (kDebug) {
-            std::cout << "  NEIGHBOR ";
-            neighbor.print(std::cout, w);
+    if (successors_ != nullptr) {
+      // Use precomputed successors
+      auto const& successor_list = (SearchDir == direction::kForward)
+                                       ? successors_->get_forward_successors(curr.get_key())
+                                       : successors_->get_backward_successors(curr.get_key());
+      
+      for (auto const& edge : successor_list) {
+        if constexpr (WithBlocked) {
+          if (blocked->test(edge.target.get_node())) {
+            continue;
           }
-          auto const total = curr_cost + cost;
-          if (total >= max) {
-            if (SearchDir == direction::kForward) {
-              max_reached_1_ = true;
-            } else {
-              max_reached_2_ = true;
-            }
-            return;
-          }
-          if (total < max &&
-              costs[neighbor.get_key()].update(
-                  l, neighbor, static_cast<cost_t>(total), curr)) {
+        }
 
-            auto next = label{neighbor, static_cast<cost_t>(total)};
-            next.track(l, r, way, neighbor.get_node(), track);
-            pq.push(std::move(next));
-
-            // Meetpoint checking is done after settling nodes
-
-            if constexpr (kDebug) {
-              std::cout << " -> PUSH\n";
-            }
+        if constexpr (kDebug) {
+          std::cout << "  NEIGHBOR ";
+          edge.target.print(std::cout, w);
+        }
+        
+        auto const total = curr_cost + edge.cost;
+        if (total >= max) {
+          if (SearchDir == direction::kForward) {
+            max_reached_1_ = true;
           } else {
-            if constexpr (kDebug) {
-              std::cout << " -> DOMINATED\n";
-            }
+            max_reached_2_ = true;
           }
-        });
+          continue;
+        }
+        
+        if (total < max &&
+            costs[edge.target.get_key()].update(
+                l, edge.target, static_cast<cost_t>(total), curr)) {
+
+          auto next = label{edge.target, static_cast<cost_t>(total)};
+          next.track(l, r, edge.way, edge.target.get_node(), edge.track);
+          pq.push(std::move(next));
+
+          if constexpr (kDebug) {
+            std::cout << " -> PUSH\n";
+          }
+        } else {
+          if constexpr (kDebug) {
+            std::cout << " -> DOMINATED\n";
+          }
+        }
+      }
+    } else {
+      // Fallback to original car::adjacent
+      car::adjacent<SearchDir, WithBlocked>(
+          r, curr, blocked, sharing, elevations,
+          [&](node const neighbor, std::uint32_t const cost, distance_t,
+              way_idx_t const way, std::uint16_t, std::uint16_t,
+              elevation_storage::elevation const, bool const track) {
+            if constexpr (kDebug) {
+              std::cout << "  NEIGHBOR ";
+              neighbor.print(std::cout, w);
+            }
+            auto const total = curr_cost + cost;
+            if (total >= max) {
+              if (SearchDir == direction::kForward) {
+                max_reached_1_ = true;
+              } else {
+                max_reached_2_ = true;
+              }
+              return;
+            }
+            if (total < max &&
+                costs[neighbor.get_key()].update(
+                    l, neighbor, static_cast<cost_t>(total), curr)) {
+
+              auto next = label{neighbor, static_cast<cost_t>(total)};
+              next.track(l, r, way, neighbor.get_node(), track);
+              pq.push(std::move(next));
+
+              if constexpr (kDebug) {
+                std::cout << " -> PUSH\n";
+              }
+            } else {
+              if constexpr (kDebug) {
+                std::cout << " -> DOMINATED\n";
+              }
+            }
+          });
+    }
 
     handle_end_of_way_meetpoint<SearchDir, WithBlocked>(w, r, curr, costs, blocked, sharing, elevations);
 
@@ -333,6 +434,7 @@ struct bidirectional_car_dijkstra {
   cost_map cost2_;
   bool max_reached_1_;
   bool max_reached_2_;
+  precomputed_successors const* successors_;
 };
 
 }  // namespace osr

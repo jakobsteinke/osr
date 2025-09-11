@@ -529,7 +529,7 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   auto forward_dist = 0.0;
 
   while (true) {
-    auto const& e = bcd.cost1_.at(forward_n.get_key());
+    auto const& e = bcd.cost1_.at(bidirectional_car_dijkstra::make_car_state(forward_n));
     auto const pred = e.pred(forward_n);
     if (pred.has_value()) {
       auto const expected_cost = static_cast<cost_t>(
@@ -566,7 +566,7 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   auto backward_dist = 0.0;
 
   while (true) {
-    auto const& e = bcd.cost2_.at(backward_n.get_key());
+    auto const& e = bcd.cost2_.at(bidirectional_car_dijkstra::make_car_state(backward_n));
     auto const pred = e.pred(backward_n);
     if (pred.has_value()) {
 
@@ -619,7 +619,7 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
                 .elevation_ = path_elevation,
                 .segments_ = forward_segments};
 
-  bcd.cost2_.at(backward_n.get_key()).write(backward_n, p);
+  bcd.cost2_.at(bidirectional_car_dijkstra::make_car_state(backward_n)).write(backward_n, p);
   return p;
 }
 

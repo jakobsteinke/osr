@@ -17,15 +17,7 @@ namespace osr {
 struct sharing_data;
 
 struct bidirectional_car_dijkstra {
-  using profile_t = car;
-  using key = car::key;
-  using label = car::label;
-  using node = car::node;
-  using entry = car::entry;
-  using hash = car::hash;
-  using cost_map = ankerl::unordered_dense::map<key, entry, hash>;
-
-  // New structures for precomputed adjacency
+  // New structures for precomputed adjacency - must be defined first
   struct car_state {
     node_idx_t n;
     way_pos_t way;
@@ -46,6 +38,15 @@ struct bidirectional_car_dijkstra {
       return wyhash::mix(h1, wyhash::mix(h2, h3));
     }
   };
+
+  using profile_t = car;
+  using key = car_state;
+  using label = car::label;
+  using node = car::node;
+  using entry = car::entry;
+  using hash = car_state_hash;
+  using cost_map = ankerl::unordered_dense::map<key, entry, hash>;
+
 
   struct edge_transition {
     node target;
@@ -130,6 +131,10 @@ struct bidirectional_car_dijkstra {
   struct get_bucket {
     cost_t operator()(label const& l) { return l.cost(); }
   };
+
+  static car_state make_car_state(node const& n) {
+    return {n.n_, n.way_, opposite(n.dir_)};
+  }
 
   void clear_mp() {
     meet_point_1_ = node::invalid();
@@ -381,8 +386,8 @@ struct bidirectional_car_dijkstra {
            cost_map& cost_map,
            dial<label, get_bucket>& d,
            sharing_data const*) {
-    if (cost_map[l.get_node().get_key()].update(l, l.get_node(), l.cost(),
-                                                node::invalid())) {
+    if (cost_map[make_car_state(l.get_node())].update(l, l.get_node(), l.cost(),
+                                                      node::invalid())) {
       d.push(l);
     }
   }
@@ -416,10 +421,10 @@ struct bidirectional_car_dijkstra {
   template <direction SearchDir>
   cost_t get_cost(node const n) const {
     if (SearchDir == direction::kForward) {
-      auto const it = cost1_.find(n.get_key());
+      auto const it = cost1_.find(make_car_state(n));
       return it != end(cost1_) ? it->second.cost(n) : kInfeasible;
     } else {
-      auto const it = cost2_.find(n.get_key());
+      auto const it = cost2_.find(make_car_state(n));
       return it != end(cost2_) ? it->second.cost(n) : kInfeasible;
     }
   }
@@ -433,7 +438,7 @@ struct bidirectional_car_dijkstra {
     return f_cost + b_cost;
   }
 
-  template <direction SearchDir, bool WithBlocked>
+    template <direction SearchDir, bool WithBlocked>
   void handle_end_of_way_meetpoint(ways const& w,
                                    ways::routing const& r,
                                    node const curr,
@@ -463,66 +468,14 @@ struct bidirectional_car_dijkstra {
 
     auto const opposite_cost_map =
         opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
-    auto const opposite_candidate = opposite_cost_map->find(curr.get_key());
+    auto const opposite_candidate = opposite_cost_map->find(make_car_state(curr));
     auto const curr_cost = get_cost<SearchDir>(curr);
     
     if (opposite_candidate != end(*opposite_cost_map)) {
       auto const other_cost = opposite_candidate->second.cost(curr);
       if (other_cost != kInfeasible) {
         evaluate_meetpoint(curr_cost, other_cost, curr, curr);
-      } else {
-        auto const pred_it = costs.find(curr.get_key());
-        if (pred_it == end(costs)) {
-          return;
-        }
-        auto const pred = pred_it->second.pred(curr);
-        if (!pred.has_value()) {
-          return;
-        }
-        // Look up adjacency for opposite direction
-        car_state curr_key{curr.n_, curr.way_, curr.dir_};
-        auto const& opp_adj_map = (opposite(SearchDir) == direction::kForward) ? legal_successors_ : legal_predecessors_;
-        
-        auto opp_it = opp_adj_map.find(curr_key);
-        if (opp_it != opp_adj_map.end()) {
-          for (auto const& edge : opp_it->second) {
-            if (edge.target.get_key() != pred->get_key()) {
-              continue;
-            }
-            auto const opposite_it =
-                opposite_cost_map->find(edge.target.get_key());
-            if (opposite_it == end(*opposite_cost_map)) {
-              continue;
-            }
-            auto const opposite_curr = opposite_it->second.pred(edge.target);
-            if (!opposite_curr.has_value() ||
-                opposite_curr->get_key() != curr.get_key()) {
-              continue;
-            }
-            auto const opposite_curr_cost =
-                opposite_candidate->second.cost(*opposite_curr);
-            auto const pred_cost = get_cost<SearchDir>(*pred);
-            auto const opposite_pred_cost =
-                opposite_it->second.cost(edge.target);
-            auto const evaluate_meetpoint_with_potential_u_turn_cost =
-                [&](cost_t const cost_1, cost_t const cost_2,
-                    node const meet_1, node const meet_2) {
-                  evaluate_meetpoint(
-                      cost_1, cost_2,
-                      SearchDir == direction::kForward ? meet_1 : meet_2,
-                      SearchDir == direction::kForward ? meet_2 : meet_1);
-                };
-            if (pred_cost + opposite_pred_cost >
-                curr_cost + opposite_curr_cost) {
-              evaluate_meetpoint_with_potential_u_turn_cost(
-                  pred_cost, opposite_pred_cost, *pred, edge.target);
-            } else {
-              evaluate_meetpoint_with_potential_u_turn_cost(
-                  curr_cost, opposite_curr_cost, curr, *opposite_curr);
-            }
-          }
-        }
-      }
+      } 
     }
   }
 
@@ -609,7 +562,7 @@ struct bidirectional_car_dijkstra {
           continue;
         }
         if (total < max &&
-            costs[edge.target.get_key()].update(
+            costs[make_car_state(edge.target)].update(
                 l, edge.target, static_cast<cost_t>(total), curr)) {
 
           auto next = label{edge.target, static_cast<cost_t>(total)};

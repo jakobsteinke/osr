@@ -17,7 +17,7 @@ namespace osr {
 struct sharing_data;
 
 struct bidirectional_car_dijkstra {
-  // New structures for precomputed adjacency - must be defined first
+  // New structures for precomputed adjacency 
   struct car_state {
     node_idx_t n;
     way_pos_t way;

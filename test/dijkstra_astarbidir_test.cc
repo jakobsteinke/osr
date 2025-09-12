@@ -224,6 +224,89 @@ TEST(dijkstra_astarbidir, monaco) {
   run(w, l, num_samples, max_cost);
 }
 
+
+TEST(dijkstra_astarbidir, hbf) {
+  auto const raw_data = "test/da_hbf.osm.pbf";
+  auto const data_dir = "test/hbf";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess for bidirectional car dijkstra with CH
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
+
+  run(w, l, num_samples, max_cost);
+}
+
+
+TEST(dijkstra_astarbidir, lui) {
+  auto const raw_data = "test/luisenplatz-darmstadt.osm.pbf";
+  auto const data_dir = "test/lui";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess for bidirectional car dijkstra with CH
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
+
+  run(w, l, num_samples, max_cost);
+}
+
+
+TEST(dijkstra_astarbidir, london) {
+  auto const raw_data = "test/london-corridor.osm.pbf";
+  auto const data_dir = "test/london";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess for bidirectional car dijkstra with CH
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
+
+  run(w, l, num_samples, max_cost);
+}
+
+TEST(dijkstra_astarbidir, ajjacio) {
+  auto const raw_data = "test/ajaccio-ferry.osm.pbf";
+  auto const data_dir = "test/ajjacio";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess for bidirectional car dijkstra with CH
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
+
+  run(w, l, num_samples, max_cost);
+}
+
 TEST(dijkstra_astarbidir, tokelau) {
   auto const raw_data = "test/tokelau-250905.osm.pbf";
   auto const data_dir = "test/tokelau";

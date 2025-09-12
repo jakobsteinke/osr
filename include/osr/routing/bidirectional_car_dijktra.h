@@ -1147,11 +1147,11 @@ public:
         car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
         ch_level_t curr_level = get_level(curr_key);
         ch_level_t next_level = get_level(next_state);
-        bool same_node = (next_state.n == curr_key.n);
+        //bool same_node = (next_state.n == curr_key.n);
         
         // Forward search: only upward edges (next_level > curr_level)
         // Backward search: only downward edges (curr_level > next_level)
-        bool level_valid = same_node || next_level > curr_level;/*(SearchDir == direction::kForward) ? 
+        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ? 
                           (next_level > curr_level) : 
                           (curr_level > next_level);*/
         

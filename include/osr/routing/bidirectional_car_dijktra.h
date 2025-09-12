@@ -375,12 +375,12 @@ struct bidirectional_car_dijkstra {
     }
   }
   // 2) collect from predecessor map
-  for (auto const& [src, edges] : legal_predecessors_) {
+  /*for (auto const& [src, edges] : legal_predecessors_) {
     add_state(src);
     for (auto const& e : edges) {
       add_state({e.target.n_, e.target.way_, e.target.dir_});
     }
-  }
+  }*/
   // 3) collect from incoming map (covers targets explicitly)
   for (auto const& [src, edges] : legal_incoming_) {
     add_state(src);
@@ -492,6 +492,122 @@ struct bidirectional_car_dijkstra {
     
     // Step 3: Contract nodes
     contract_nodes(w, r, blocked, sharing, elevations);
+    
+    // Step 4: Print first 10 nodes by level after preprocessing
+    print_first_10_nodes_by_level();
+  }
+
+  static void print_first_10_nodes_by_level() {
+    // Create a vector of states sorted by level
+    std::vector<std::pair<car_state, ch_level_t>> states_by_level;
+    for (auto const& [state, level] : car_state_levels_) {
+      states_by_level.emplace_back(state, level);
+    }
+    
+    // Sort by level
+    std::sort(states_by_level.begin(), states_by_level.end(), 
+              [](auto const& a, auto const& b) { return a.second < b.second; });
+    
+    std::cout << "\n=== ADJACENCY DATA FOR FIRST 10 NODES BY LEVEL ===\n";
+    std::cout << "Total nodes: " << states_by_level.size() << std::endl;
+    std::cout << "Successors map size: " << legal_successors_.size() << std::endl;
+    std::cout << "Predecessors map size: " << legal_predecessors_.size() << std::endl;
+    std::cout << "Incoming map size: " << legal_incoming_.size() << std::endl;
+    
+    // Print first 10 nodes by level
+    for (size_t i = 330; i < std::min(static_cast<size_t>(340), states_by_level.size()); ++i) {
+      const auto& [state, level] = states_by_level[i];
+      
+      std::cout << "\n--- NODE " << (i + 1) << " ---\n";
+      std::cout << "State: {n=" << to_idx(state.n) 
+                << ", way=" << static_cast<int>(state.way) 
+                << ", dir=" << (state.dir == direction::kForward ? "FWD" : "BWD") 
+                << "}\n";
+      std::cout << "Level: " << level << "\n";
+      
+      // Print legal_successors
+      std::cout << "\nLEGAL_SUCCESSORS:\n";
+      auto succ_it = legal_successors_.find(state);
+      if (succ_it != legal_successors_.end()) {
+        std::cout << "  Count: " << succ_it->second.size() << "\n";
+        for (size_t j = 0; j < succ_it->second.size(); ++j) {
+          const auto& edge = succ_it->second[j];
+          std::cout << "  [" << j << "] -> {n=" << to_idx(edge.target.n_) 
+                    << ", way=" << static_cast<int>(edge.target.way_)
+                    << ", dir=" << (edge.target.dir_ == direction::kForward ? "FWD" : "BWD") 
+                    << "} cost=" << edge.cost 
+                    << " dist=" << edge.dist
+                    << " way_idx=" << to_idx(edge.way)
+                    << " from=" << edge.from 
+                    << " to=" << edge.to;
+          if (edge.is_shortcut) {
+            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
+                      << ", way=" << static_cast<int>(edge.via_state.way)
+                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
+                      << "}]";
+          }
+          std::cout << "\n";
+        }
+      } else {
+        std::cout << "  Count: 0 (not found in map)\n";
+      }
+      
+      // Print legal_predecessors
+      std::cout << "\nLEGAL_PREDECESSORS:\n";
+      auto pred_it = legal_predecessors_.find(state);
+      if (pred_it != legal_predecessors_.end()) {
+        std::cout << "  Count: " << pred_it->second.size() << "\n";
+        for (size_t j = 0; j < pred_it->second.size(); ++j) {
+          const auto& edge = pred_it->second[j];
+          std::cout << "  [" << j << "] -> {n=" << to_idx(edge.target.n_) 
+                    << ", way=" << static_cast<int>(edge.target.way_)
+                    << ", dir=" << (edge.target.dir_ == direction::kForward ? "FWD" : "BWD") 
+                    << "} cost=" << edge.cost 
+                    << " dist=" << edge.dist
+                    << " way_idx=" << to_idx(edge.way)
+                    << " from=" << edge.from 
+                    << " to=" << edge.to;
+          if (edge.is_shortcut) {
+            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
+                      << ", way=" << static_cast<int>(edge.via_state.way)
+                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
+                      << "}]";
+          }
+          std::cout << "\n";
+        }
+      } else {
+        std::cout << "  Count: 0 (not found in map)\n";
+      }
+      
+      // Print legal_incoming
+      std::cout << "\nLEGAL_INCOMING:\n";
+      auto inc_it = legal_incoming_.find(state);
+      if (inc_it != legal_incoming_.end()) {
+        std::cout << "  Count: " << inc_it->second.size() << "\n";
+        for (size_t j = 0; j < inc_it->second.size(); ++j) {
+          const auto& edge = inc_it->second[j];
+          std::cout << "  [" << j << "] <- {n=" << to_idx(edge.source.n_) 
+                    << ", way=" << static_cast<int>(edge.source.way_)
+                    << ", dir=" << (edge.source.dir_ == direction::kForward ? "FWD" : "BWD") 
+                    << "} cost=" << edge.cost 
+                    << " dist=" << edge.dist
+                    << " way_idx=" << to_idx(edge.way)
+                    << " from=" << edge.from 
+                    << " to=" << edge.to;
+          if (edge.is_shortcut) {
+            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
+                      << ", way=" << static_cast<int>(edge.via_state.way)
+                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
+                      << "}]";
+          }
+          std::cout << "\n";
+        }
+      } else {
+        std::cout << "  Count: 0 (not found in map)\n";
+      }
+    }
+    
+    std::cout << "\n=== END ADJACENCY DATA ===\n";
   }
 
 private:

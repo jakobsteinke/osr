@@ -195,6 +195,65 @@ struct car {
         }
 
         auto const is_u_turn = way_pos == n.way_ && way_dir == opposite(n.dir_);
+        if (is_u_turn) {
+          //std::cout << "U-Turn detected\n";
+        }
+        auto const dist = w.way_node_dist_[way][std::min(from, to)];
+        auto const target =
+            node{target_node, w.get_way_pos(target_node, way, to), way_dir};
+        auto const cost = way_cost(target_way_prop, way_dir, dist) +
+                          node_cost(target_node_prop) +
+                          (is_u_turn ? kUturnPenalty : 0U);
+        fn(target, cost, dist, way, from, to, elevation_storage::elevation{},
+           false);
+      };
+
+      if (i != 0U) {
+        expand(flip<SearchDir>(direction::kBackward), i, i - 1);
+      }
+      if (i != w.way_nodes_[way].size() - 1U) {
+        expand(flip<SearchDir>(direction::kForward), i, i + 1);
+      }
+
+      ++way_pos;
+    }
+  }
+
+  template <direction SearchDir, bool WithBlocked, typename Fn>
+  static void adjacent_ch(ways::routing const& w,
+                       node const n,
+                       bitvec<node_idx_t> const* blocked,
+                       sharing_data const*,
+                       elevation_storage const*,
+                       Fn&& fn) {
+    auto way_pos = way_pos_t{0U};
+    for (auto const [way, i] :
+         utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
+      auto const expand = [&](direction const way_dir, std::uint16_t const from,
+                              std::uint16_t const to) {
+        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
+        auto const target_node = w.way_nodes_[way][to];
+        if constexpr (WithBlocked) {
+          if (blocked->test(target_node)) {
+            return;
+          }
+        }
+
+        auto const target_node_prop = w.node_properties_[target_node];
+        if (node_cost(target_node_prop) == kInfeasible) {
+          return;
+        }
+
+        auto const target_way_prop = w.way_properties_[way];
+        if (way_cost(target_way_prop, way_dir, 0U) == kInfeasible) {
+          return;
+        }
+
+        if (w.is_restricted<SearchDir>(n.n_, n.way_, way_pos)) {
+          return;
+        }
+
+        auto const is_u_turn = way_pos == n.way_ && way_dir == opposite(n.dir_);
         auto const dist = w.way_node_dist_[way][std::min(from, to)];
         auto const target =
             node{target_node, w.get_way_pos(target_node, way, to), way_dir};

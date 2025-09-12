@@ -153,6 +153,9 @@ struct bidirectional_car_dijkstra {
 
   static ch_level_t get_level(car_state const& state) {
     auto it = car_state_levels_.find(state);
+    if (it == car_state_levels_.end()) {
+        std::cout << "Returned Level 0\n";
+    }
     return it != car_state_levels_.end() ? it->second : 0;
   }
 
@@ -302,7 +305,7 @@ struct bidirectional_car_dijkstra {
     return nullptr;
   }
 
-  static void assign_random_levels() {
+ /* static void assign_random_levels() {
     car_state_levels_.clear();
     
     // Collect all unique car_states from both successor and predecessor maps
@@ -317,14 +320,14 @@ struct bidirectional_car_dijkstra {
     }
     
     // Remove duplicates
-    /*std::sort(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
+    std::sort(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
       if (a.n != b.n) return a.n < b.n;
       if (a.way != b.way) return a.way < b.way;
       return a.dir < b.dir;
     });
     all_states.erase(std::unique(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
       return a.n == b.n && a.way == b.way && a.dir == b.dir;
-    }), all_states.end());*/
+    }), all_states.end());
     
     // Assign random levels
     std::random_device rd;
@@ -339,10 +342,71 @@ struct bidirectional_car_dijkstra {
       car_state_levels_[all_states[i]] = levels[i];
     }
     
+    // Print level of each node after assignment
+    std::cout << "Level assignment for " << all_states.size() << " car_states:\n";
+    /*for (size_t i = 0; i < all_states.size(); ++i) {
+      auto const& state = all_states[i];
+      std::cout << "Node " << to_idx(state.n) << " (way=" << static_cast<int>(state.way) 
+                << ", dir=" << (state.dir == direction::kForward ? "FWD" : "BWD") 
+                << ") -> Level " << levels[i] << "\n";
+    }
+    
     if constexpr (kDebugMaps) {
       std::cout << "Assigned random levels to " << all_states.size() << " car_states\n";
     }
+  } */
+
+  static void assign_random_levels() {
+  car_state_levels_.clear();
+
+  auto add_state = [&](car_state const& s) {
+    // no-op if present
+    if (car_state_levels_.find(s) == car_state_levels_.end()) {
+      car_state_levels_.emplace(s, 0); // temp
+    }
+  };
+
+  // 1) collect from successor map
+  for (auto const& [src, edges] : legal_successors_) {
+    add_state(src);
+    for (auto const& e : edges) {
+      add_state({e.target.n_, e.target.way_, e.target.dir_});
+    }
   }
+  // 2) collect from predecessor map
+  for (auto const& [src, edges] : legal_predecessors_) {
+    add_state(src);
+    for (auto const& e : edges) {
+      add_state({e.target.n_, e.target.way_, e.target.dir_});
+    }
+  }
+  // 3) collect from incoming map (covers targets explicitly)
+  for (auto const& [src, edges] : legal_incoming_) {
+    add_state(src);
+    for (auto const& e : edges) {
+      add_state({e.target.n_, e.target.way_, e.target.dir_});
+    }
+  }
+
+  // Assign levels 1..N randomly
+  std::vector<car_state> all_states;
+  all_states.reserve(car_state_levels_.size());
+  for (auto const& kv : car_state_levels_) all_states.push_back(kv.first);
+
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::vector<ch_level_t> levels(all_states.size());
+  for (ch_level_t i = 0; i < static_cast<ch_level_t>(levels.size()); ++i) levels[i] = i + 1;
+  std::shuffle(levels.begin(), levels.end(), gen);
+
+  for (size_t i = 0; i < all_states.size(); ++i) {
+    car_state_levels_[all_states[i]] = levels[i];
+  }
+
+  // Optional: validation
+  // verify_levels_complete();  // (see below)
+}
+
 
   // Local witness search for contraction - only consider nodes with level >= min_level, exclude contracted_node
   static std::unordered_map<car_state, cost_t, car_state_hash> 
@@ -620,7 +684,7 @@ public:
     }
     
     // Get all adjacent nodes for this search direction
-    car::adjacent<SearchDir, WithBlocked>(
+    car::adjacent_ch<SearchDir, WithBlocked>(
         r, n, blocked, sharing, elevations,
         [&](node const target, std::uint32_t const cost, distance_t const dist,
             way_idx_t const way, std::uint16_t const from, std::uint16_t const to,
@@ -850,10 +914,11 @@ public:
         car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
         ch_level_t curr_level = get_level(curr_key);
         ch_level_t next_level = get_level(next_state);
+        bool same_node = (next_state.n == curr_key.n);
         
         // Forward search: only upward edges (next_level > curr_level)
         // Backward search: only downward edges (curr_level > next_level)
-        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ? 
+        bool level_valid = same_node || next_level > curr_level;/*(SearchDir == direction::kForward) ? 
                           (next_level > curr_level) : 
                           (curr_level > next_level);*/
         
@@ -922,7 +987,7 @@ public:
            bitvec<node_idx_t> const* blocked,
            sharing_data const* sharing,
            elevation_storage const* elevations) {
-    if constexpr (kDebugMaps) {
+    if constexpr (true) {
       std::cout << "\n=== Starting bidirectional search with max_cost=" << max << " ===\n";
       std::cout << "Initial PQ sizes: pq1=" << pq1_.size() << ", pq2=" << pq2_.size() << "\n";
     }

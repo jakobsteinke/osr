@@ -176,23 +176,23 @@ struct bidirectional_car_dijkstra {
     legal_incoming_.clear();
     
     if constexpr (kDebugMaps) {
-      std::cout << "Starting adjacency preprocessing for " << w.n_nodes() << " nodes...\n";
+      std::cout << "Starting unified adjacency preprocessing for " << w.n_nodes() << " nodes...\n";
     }
     
     // Enumerate all nodes in the graph
     for (auto n = node_idx_t{0}; n < node_idx_t{w.n_nodes()}; ++n) {
       // For each node, get all valid car node states (node_idx_t, way_pos_t, direction)
       car::resolve_all(r, n, level_t{std::uint8_t{0}}, [&](node const car_node) {
-        // Build adjacency for both search directions
+        // Build unified adjacency - forward pass populates all three maps
         build_adjacency_for_node_static<direction::kForward>(w, r, car_node, blocked, sharing, elevations);
-        build_adjacency_for_node_static<direction::kBackward>(w, r, car_node, blocked, sharing, elevations);
       });
     }
     
     if constexpr (kDebugMaps) {
-      std::cout << "Adjacency preprocessing completed: " 
+      std::cout << "Unified adjacency preprocessing completed: " 
                 << legal_successors_.size() << " successor entries, "
-                << legal_predecessors_.size() << " predecessor entries\n";
+                << legal_predecessors_.size() << " predecessor entries, "
+                << legal_incoming_.size() << " incoming entries\n";
     }
     
     if constexpr (kDebugMaps) {
@@ -479,6 +479,104 @@ struct bidirectional_car_dijkstra {
     return distances;
   }
 
+  // Validation functions to ensure adjacency map consistency
+  static void validate_adjacency_maps() {
+    std::cout << "\n=== VALIDATING ADJACENCY MAP CONSISTENCY ===\n";
+    
+    size_t forward_edges = 0;
+    size_t reverse_mismatches = 0;
+    size_t cost_mismatches = 0;
+    size_t incoming_mismatches = 0;
+    
+    // For every forward edge u -> v, verify:
+    // 1. Corresponding reverse edge v -> u exists in legal_predecessors_[v]
+    // 2. Same cost between forward and reverse edges  
+    // 3. Corresponding incoming edge exists in legal_incoming_[v]
+    for (auto const& [source_state, transitions] : legal_successors_) {
+      for (auto const& forward_edge : transitions) {
+        forward_edges++;
+        
+        car_state target_state{forward_edge.target.n_, forward_edge.target.way_, forward_edge.target.dir_};
+        
+        // Check if reverse edge exists in predecessors
+        auto pred_it = legal_predecessors_.find(target_state);
+        bool found_reverse = false;
+        cost_t reverse_cost = 0;
+        
+        if (pred_it != legal_predecessors_.end()) {
+          for (auto const& backward_edge : pred_it->second) {
+            if (backward_edge.target.n_ == source_state.n &&
+                backward_edge.target.way_ == source_state.way &&
+                backward_edge.target.dir_ == source_state.dir) {
+              found_reverse = true;
+              reverse_cost = backward_edge.cost;
+              break;
+            }
+          }
+        }
+        
+        if (!found_reverse) {
+          reverse_mismatches++;
+          if (reverse_mismatches <= 5) {
+            std::cout << "MISSING REVERSE: Forward edge {n=" << to_idx(source_state.n) 
+                      << ",way=" << static_cast<int>(source_state.way)
+                      << ",dir=" << (source_state.dir == direction::kForward ? "FWD" : "BWD")
+                      << "} -> {n=" << to_idx(target_state.n)
+                      << ",way=" << static_cast<int>(target_state.way) 
+                      << ",dir=" << (target_state.dir == direction::kForward ? "FWD" : "BWD")
+                      << "} has no reverse edge\n";
+          }
+        } else if (forward_edge.cost != reverse_cost) {
+          cost_mismatches++;
+          if (cost_mismatches <= 5) {
+            std::cout << "COST MISMATCH: Edge costs differ - forward=" << forward_edge.cost 
+                      << " vs reverse=" << reverse_cost << "\n";
+          }
+        }
+        
+        // Check if incoming edge exists
+        auto inc_it = legal_incoming_.find(target_state);
+        bool found_incoming = false;
+        
+        if (inc_it != legal_incoming_.end()) {
+          for (auto const& incoming_edge : inc_it->second) {
+            if (incoming_edge.source.n_ == source_state.n &&
+                incoming_edge.source.way_ == source_state.way &&
+                incoming_edge.source.dir_ == source_state.dir &&
+                incoming_edge.cost == forward_edge.cost) {
+              found_incoming = true;
+              break;
+            }
+          }
+        }
+        
+        if (!found_incoming) {
+          incoming_mismatches++;
+          if (incoming_mismatches <= 5) {
+            std::cout << "MISSING INCOMING: Forward edge not found in incoming map for target\n";
+          }
+        }
+      }
+    }
+    
+    std::cout << "\nValidation Results:\n";
+    std::cout << "  Total forward edges: " << forward_edges << "\n";
+    std::cout << "  Missing reverse edges: " << reverse_mismatches << "\n";
+    std::cout << "  Cost mismatches: " << cost_mismatches << "\n";
+    std::cout << "  Missing incoming edges: " << incoming_mismatches << "\n";
+    std::cout << "  Map sizes - successors: " << legal_successors_.size() 
+              << ", predecessors: " << legal_predecessors_.size()
+              << ", incoming: " << legal_incoming_.size() << "\n";
+    
+    if (reverse_mismatches == 0 && cost_mismatches == 0 && incoming_mismatches == 0) {
+      std::cout << "✓ ADJACENCY MAPS ARE CONSISTENT!\n";
+    } else {
+      std::cout << "✗ ADJACENCY MAPS HAVE INCONSISTENCIES!\n";
+    }
+    
+    std::cout << "==========================================\n";
+  }
+
   static void preprocess(ways const& w,
                         ways::routing const& r,
                         bitvec<node_idx_t> const* blocked = nullptr,
@@ -487,11 +585,21 @@ struct bidirectional_car_dijkstra {
     // Step 1: Build initial adjacency (normal edges)
     build_initial_adjacency(w, r, blocked, sharing, elevations);
     
+    // Step 1.5: Validate initial adjacency consistency
+    if constexpr (kDebugMaps) {
+      validate_adjacency_maps();
+    }
+    
     // Step 2: Assign random levels
     assign_random_levels();
     
     // Step 3: Contract nodes
     contract_nodes(w, r, blocked, sharing, elevations);
+    
+    // Step 3.5: Validate final adjacency consistency after contraction
+    if constexpr (kDebugMaps) {
+      validate_adjacency_maps();
+    }
     
     // Step 4: Print first 10 nodes by level after preprocessing
     print_first_10_nodes_by_level();
@@ -788,10 +896,12 @@ public:
                                              bitvec<node_idx_t> const* blocked,
                                              sharing_data const* sharing,
                                              elevation_storage const* elevations) {
+    static_assert(SearchDir == direction::kForward, "Unified adjacency building only supports forward direction");
+    
     car_state source_key{n.n_, n.way_, n.dir_};
     
     if constexpr (kDebugMaps) {
-      std::cout << "\n=== Building adjacency for node ===\n";
+      std::cout << "\n=== Building unified adjacency for node ===\n";
       std::cout << "Source: ";
       n.print(std::cout, w);
       std::cout << "\n";
@@ -799,11 +909,10 @@ public:
                 << ", way=" << static_cast<int>(source_key.way) 
                 << ", dir=" << (source_key.dir == direction::kForward ? "FWD" : "BWD") 
                 << "}\n";
-      std::cout << "Search direction: " << (SearchDir == direction::kForward ? "FORWARD" : "BACKWARD") << "\n";
     }
     
-    // Get all adjacent nodes for this search direction
-    car::adjacent_ch<SearchDir, WithBlocked>(
+    // Get all forward adjacent nodes and populate all three maps simultaneously
+    car::adjacent_ch<direction::kForward, WithBlocked>(
         r, n, blocked, sharing, elevations,
         [&](node const target, std::uint32_t const cost, distance_t const dist,
             way_idx_t const way, std::uint16_t const from, std::uint16_t const to,
@@ -819,29 +928,34 @@ public:
           
           car_state target_key{target.n_, target.way_, target.dir_};
           
-          if (SearchDir == direction::kForward) {
-            // For forward search, store as successors
-            legal_successors_[source_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
-            // Also add to incoming map for the target
-            legal_incoming_[target_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
-          } else {
-            // For backward search, store as predecessors  
-            legal_predecessors_[source_key].push_back({n, target, static_cast<cost_t>(cost), dist, way, from, to});
+          // Create forward edge transition
+          edge_transition forward_edge{n, target, static_cast<cost_t>(cost), dist, way, from, to};
+          
+          // Create corresponding backward edge transition (same cost, reversed source/target)
+          edge_transition backward_edge{target, n, static_cast<cost_t>(cost), dist, way, to, from};
+          
+          // Update all three maps simultaneously to ensure perfect symmetry
+          legal_successors_[source_key].push_back(forward_edge);
+          legal_incoming_[target_key].push_back(forward_edge);
+          legal_predecessors_[target_key].push_back(backward_edge);
+          
+          if constexpr (kDebugMaps) {
+            std::cout << "    Added to successors[" << to_idx(source_key.n) << "," 
+                      << static_cast<int>(source_key.way) << "," 
+                      << (source_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
+            std::cout << "    Added to incoming[" << to_idx(target_key.n) << "," 
+                      << static_cast<int>(target_key.way) << "," 
+                      << (target_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
+            std::cout << "    Added to predecessors[" << to_idx(target_key.n) << "," 
+                      << static_cast<int>(target_key.way) << "," 
+                      << (target_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
           }
         });
     
     if constexpr (kDebugMaps) {
-      auto const& map = (SearchDir == direction::kForward) ? legal_successors_ : legal_predecessors_;
-      auto it = map.find(source_key);
-      if (it != map.end()) {
-        std::cout << "Stored " << it->second.size() << " transitions in " 
-                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
-                  << " map\n";
-      } else {
-        std::cout << "Stored 0 transitions in " 
-                  << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors") 
-                  << " map\n";
-      }
+      auto succ_it = legal_successors_.find(source_key);
+      int succ_count = (succ_it != legal_successors_.end()) ? succ_it->second.size() : 0;
+      std::cout << "Stored " << succ_count << " forward transitions for this node\n";
       std::cout << "=================================\n";
     }
   }

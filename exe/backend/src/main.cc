@@ -4,6 +4,7 @@
 
 #include "boost/asio/executor_work_guard.hpp"
 #include "boost/asio/io_context.hpp"
+#include "osr/routing/bidirectional_car_dijktra.h"
 
 #include "fmt/core.h"
 #include "fmt/std.h"
@@ -93,6 +94,23 @@ int main(int argc, char const* argv[]) {
   auto const elevations = elevation_storage::try_open(opt.data_dir_);
 
   auto const l = lookup{w, opt.data_dir_, cista::mmap::protection::READ};
+
+  {  // new
+    using osr::bidirectional_car_dijkstra;
+    std::cout << "[BCD] preprocessing start...\n";
+    auto t0 = std::chrono::steady_clock::now();
+
+    // If you want elevation-aware edge data, pass elevations.get(); otherwise nullptr is fine.
+    bidirectional_car_dijkstra::preprocess(
+        w, *w.r_,
+        /*blocked=*/nullptr,
+        /*sharing=*/nullptr,
+        /*elevations=*/elevations ? elevations.get() : nullptr);
+
+    auto t1 = std::chrono::steady_clock::now();
+    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+    std::cout << "[BCD] preprocessing done in " << ms << " ms\n";
+  }
 
   auto ioc = boost::asio::io_context{};
   auto pool = boost::asio::io_context{};

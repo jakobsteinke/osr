@@ -137,7 +137,8 @@ struct bidirectional_car_dijkstra {
       delete second_edge;
     }
   };
-
+  
+  using chosen_edge_map = ankerl::unordered_dense::map<car_state, edge_transition, car_state_hash>;
   using adjacency_map = ankerl::unordered_dense::map<car_state, std::vector<edge_transition>, car_state_hash>;
 
   constexpr static auto const kDebug = false;
@@ -640,6 +641,8 @@ public:
     pq2_.n_buckets(max + 1U);
     cost1_.clear();
     cost2_.clear();
+    chosen_edge_fwd_.clear();
+    chosen_edge_bwd_.clear();
     clear_mp();
     start_loc_ = start_loc;
     end_loc_ = end_loc;
@@ -948,6 +951,12 @@ public:
           next.track(l, r, edge.way, edge.target.get_node(), false);
           pq.push(std::move(next));
 
+          // Record the chosen transition for reconstruction
+          auto& chosen_map = (SearchDir == direction::kForward)
+                               ? chosen_edge_fwd_
+                               : chosen_edge_bwd_;
+          chosen_map[make_car_state(edge.target)] = edge;
+
           // Meetpoint checking is done after settling nodes
 
           if constexpr (kDebug) {
@@ -987,7 +996,7 @@ public:
            bitvec<node_idx_t> const* blocked,
            sharing_data const* sharing,
            elevation_storage const* elevations) {
-    if constexpr (true) {
+    if constexpr (kDebugMaps) {
       std::cout << "\n=== Starting bidirectional search with max_cost=" << max << " ===\n";
       std::cout << "Initial PQ sizes: pq1=" << pq1_.size() << ", pq2=" << pq2_.size() << "\n";
     }
@@ -1047,6 +1056,8 @@ public:
   cost_map cost2_;
   bool max_reached_1_;
   bool max_reached_2_;
+  chosen_edge_map chosen_edge_fwd_;  // edges used by forward search
+  chosen_edge_map chosen_edge_bwd_;  // edges used by backward search
   static adjacency_map legal_successors_;
   static adjacency_map legal_predecessors_;
   static adjacency_map legal_incoming_;

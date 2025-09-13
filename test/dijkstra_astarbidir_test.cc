@@ -245,7 +245,6 @@ TEST(dijkstra_astarbidir, hbf) {
   run(w, l, num_samples, max_cost);
 }
 
-
 TEST(dijkstra_astarbidir, lui) {
   auto const raw_data = "test/luisenplatz-darmstadt.osm.pbf";
   auto const data_dir = "test/lui";
@@ -265,6 +264,27 @@ TEST(dijkstra_astarbidir, lui) {
 
   run(w, l, num_samples, max_cost);
 }
+
+TEST(dijkstra_astarbidir, tuvalu) {
+  auto const raw_data = "test/tuvalu-250912.osm.pbf";
+  auto const data_dir = "test/tuvalu";
+  auto const num_samples = 2000U;
+  auto const max_cost = 3600U;
+
+  if (!fs::exists(raw_data) && !fs::exists(data_dir)) {
+    GTEST_SKIP() << raw_data << " not found";
+  }
+
+  load(raw_data, data_dir);
+  auto const w = osr::ways{data_dir, cista::mmap::protection::READ};
+  auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
+
+  // Preprocess for bidirectional car dijkstra with CH
+  bidirectional_car_dijkstra::preprocess(w, *w.r_);
+
+  run(w, l, num_samples, max_cost);
+}
+
 
 
 TEST(dijkstra_astarbidir, london) {

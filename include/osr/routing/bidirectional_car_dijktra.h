@@ -594,7 +594,7 @@ struct bidirectional_car_dijkstra {
     assign_random_levels();
     
     // Step 3: Contract nodes
-    contract_nodes(w, r, blocked, sharing, elevations);
+    //contract_nodes(w, r, blocked, sharing, elevations);
     
     // Step 3.5: Validate final adjacency consistency after contraction
     if constexpr (kDebugMaps) {
@@ -867,6 +867,11 @@ public:
     cost2_.clear();
     chosen_edge_fwd_.clear();
     chosen_edge_bwd_.clear();
+     // heuristic: assume a few thousand states per small graph
+    cost1_.reserve(4096);
+    cost2_.reserve(4096);
+    chosen_edge_fwd_.reserve(4096);
+    chosen_edge_bwd_.reserve(4096);
     clear_mp();
     start_loc_ = start_loc;
     end_loc_ = end_loc;
@@ -1161,7 +1166,7 @@ public:
                       << ", next=" << next_level << ", dir=" 
                       << (SearchDir == direction::kForward ? "FWD" : "BWD") << ")\n";
           }
-          continue;
+          //continue;
         }
 
         auto const total = curr_cost + edge.cost;

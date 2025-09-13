@@ -218,96 +218,100 @@ struct car {
       ++way_pos;
     }
   }
-
+  
   template <direction SearchDir, bool WithBlocked, typename Fn>
-  static void adjacent_ch(ways::routing const& w,
-                       node const n,
-                       bitvec<node_idx_t> const* blocked,
-                       sharing_data const*,
-                       elevation_storage const*,
-                       Fn&& fn) {
-    auto way_pos = way_pos_t{0U};
-    for (auto const [way, i] :
-         utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
-      auto const expand = [&](direction const way_dir, std::uint16_t const from,
-                              std::uint16_t const to) {
-        // NOLINTNEXTLINE(clang-analyzer-core.CallAndMessage)
-        auto const target_node = w.way_nodes_[way][to];
-        if constexpr (WithBlocked) {
-          if (blocked->test(target_node)) {
-            return;
-          }
-        }
-
-        auto const target_node_prop = w.node_properties_[target_node];
-        if (node_cost(target_node_prop) == kInfeasible) {
+static void adjacent_ch(ways::routing const& w,
+                        node const n,
+                        bitvec<node_idx_t> const* blocked,
+                        sharing_data const*,
+                        elevation_storage const*,
+                        Fn&& fn) {
+  // --- along-way expansions (unchanged) ---
+  auto way_pos = way_pos_t{0U};
+  for (auto const [way, i] :
+       utl::zip_unchecked(w.node_ways_[n.n_], w.node_in_way_idx_[n.n_])) {
+    auto const expand = [&](direction const way_dir, std::uint16_t const from,
+                            std::uint16_t const to) {
+      auto const target_node = w.way_nodes_[way][to];
+      if constexpr (WithBlocked) {
+        if (blocked->test(target_node)) {
           return;
         }
-
-        auto const target_way_prop = w.way_properties_[way];
-        if (way_cost(target_way_prop, way_dir, 0U) == kInfeasible) {
-          return;
-        }
-
-        if (w.is_restricted<SearchDir>(n.n_, n.way_, way_pos)) {
-          return;
-        }
-
-        auto const is_u_turn = way_pos == n.way_ && way_dir == opposite(n.dir_);
-        auto const dist = w.way_node_dist_[way][std::min(from, to)];
-        auto const target =
-            node{target_node, w.get_way_pos(target_node, way, to), way_dir};
-        auto const cost = way_cost(target_way_prop, way_dir, dist) +
-                          node_cost(target_node_prop) +
-                          (is_u_turn ? kUturnPenalty : 0U);
-        fn(target, cost, dist, way, from, to, elevation_storage::elevation{},
-           false);
-      };
-
-      if (i != 0U) {
-        expand(flip<SearchDir>(direction::kBackward), i, i - 1);
-      }
-      if (i != w.way_nodes_[way].size() - 1U) {
-        expand(flip<SearchDir>(direction::kForward), i, i + 1);
       }
 
-      ++way_pos;
+      auto const target_node_prop = w.node_properties_[target_node];
+      if (car::node_cost(target_node_prop) == kInfeasible) {
+        return;
+      }
+
+      auto const target_way_prop = w.way_properties_[way];
+      if (car::way_cost(target_way_prop, way_dir, 0U) == kInfeasible) {
+        return;
+      }
+
+      if (w.is_restricted<SearchDir>(n.n_, n.way_, way_pos)) {
+        return;
+      }
+
+      auto const is_u_turn = way_pos == n.way_ && way_dir == opposite(n.dir_);
+      auto const dist = w.way_node_dist_[way][std::min(from, to)];
+      auto const target =
+          node{target_node, w.get_way_pos(target_node, way, to), way_dir};
+      auto const cost = car::way_cost(target_way_prop, way_dir, dist) +
+                        car::node_cost(target_node_prop) +
+                        (is_u_turn ? car::kUturnPenalty : 0U);
+      fn(target, cost, dist, way, from, to, elevation_storage::elevation{}, false);
+    };
+
+    if (i != 0U) {
+      expand(flip<SearchDir>(direction::kBackward), i, i - 1);
+    }
+    if (i != w.way_nodes_[way].size() - 1U) {
+      expand(flip<SearchDir>(direction::kForward), i, i + 1);
     }
 
-    // Same node_idx_t expansions: transitions between different ways at the same node
-    auto from_way_pos = way_pos_t{0U};
-    for (auto const from_way : w.node_ways_[n.n_]) {
-      if (from_way_pos == n.way_) {
-        ++from_way_pos;
-        continue; // Skip self-transitions
-      }
-
-      // Check if we can legally transition from current way to from_way
-      if (w.is_restricted<SearchDir>(n.n_, n.way_, from_way_pos)) {
-        ++from_way_pos;
-        continue;
-      }
-
-      // Add transitions for both directions on the target way
-      auto const target_way_prop = w.way_properties_[from_way];
-      
-      // Forward direction transition
-      if (way_cost(target_way_prop, direction::kForward, 0U) != kInfeasible) {
-        auto const target = node{n.n_, from_way_pos, direction::kForward};
-        auto const cost = 0U; // No distance cost for same-node transitions
-        fn(target, cost, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);
-      }
-
-      // Backward direction transition
-      if (way_cost(target_way_prop, direction::kBackward, 0U) != kInfeasible) {
-        auto const target = node{n.n_, from_way_pos, direction::kBackward};
-        auto const cost = 0U; // No distance cost for same-node transitions
-        fn(target, cost, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);
-      }
-
-      ++from_way_pos;
-    }
+    ++way_pos;
   }
+
+  // --- same-node transitions (fixed) ---
+  // Move between ways at the SAME node n.n_. Charge base way_cost(., 0).
+  // For self-way, only allow opposite-dir (U-turn) and add kUturnPenalty.
+  auto from_way_pos = way_pos_t{0U};
+  for (auto const from_way : w.node_ways_[n.n_]) {
+    // respect turn restrictions for switching from (n.way_) to (from_way_pos)
+    if (w.is_restricted<SearchDir>(n.n_, n.way_, from_way_pos)) {
+      ++from_way_pos;
+      continue;
+    }
+
+    auto const& target_way_prop = w.way_properties_[from_way];
+
+    if (from_way_pos == n.way_) {
+      // Self-way: allow only opposite direction as a U-turn.
+      auto const dir = opposite(n.dir_);
+      auto const base = car::way_cost(target_way_prop, dir, 0U);
+      if (base != kInfeasible) {
+        auto const target = node{n.n_, from_way_pos, dir};
+        auto const cost = base + car::kUturnPenalty;
+        fn(target, cost, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);
+      }
+    } else {
+      // Other way at the same node: add both directions with base cost.
+      // (No U-turn penalty here—this is a normal turn across ways.)
+      for (auto const dir : {direction::kForward, direction::kBackward}) {
+        auto const base = car::way_cost(target_way_prop, dir, 0U);
+        if (base == kInfeasible) {
+          continue;
+        }
+        auto const target = node{n.n_, from_way_pos, dir};
+        fn(target, base +  car::kUturnPenalty, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);  // base + car::kUturnPenalty
+      }
+    }
+
+    ++from_way_pos;
+  }
+}
+
 
   static bool is_dest_reachable(ways::routing const& w,
                                 node const n,

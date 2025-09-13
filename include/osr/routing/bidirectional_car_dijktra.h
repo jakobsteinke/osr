@@ -917,7 +917,7 @@ public:
     }
     
     // Get all forward adjacent nodes and populate all three maps simultaneously
-    car::adjacent_ch<direction::kForward, WithBlocked>(
+    car::adjacent<direction::kForward, WithBlocked>(
         r, n, blocked, sharing, elevations,
         [&](node const target, std::uint32_t const cost, distance_t const dist,
             way_idx_t const way, std::uint16_t const from, std::uint16_t const to,

@@ -219,7 +219,7 @@ struct car {
     }
   }
   
-  template <direction SearchDir, bool WithBlocked, typename Fn>
+ /*template <direction SearchDir, bool WithBlocked, typename Fn>
 static void adjacent_ch(ways::routing const& w,
                         node const n,
                         bitvec<node_idx_t> const* blocked,
@@ -304,13 +304,13 @@ static void adjacent_ch(ways::routing const& w,
           continue;
         }
         auto const target = node{n.n_, from_way_pos, dir};
-        fn(target, base +  car::kUturnPenalty, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);  // base + car::kUturnPenalty
+        fn(target, base, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);  // base + car::kUturnPenalty
       }
     }
 
     ++from_way_pos;
   }
-}
+}*/
 
 
   static bool is_dest_reachable(ways::routing const& w,

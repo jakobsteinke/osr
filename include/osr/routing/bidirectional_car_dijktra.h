@@ -140,9 +140,9 @@ struct bidirectional_car_dijkstra {
   
   using chosen_edge_map = ankerl::unordered_dense::map<car_state, edge_transition, car_state_hash>;
   using adjacency_map = ankerl::unordered_dense::map<car_state, std::vector<edge_transition>, car_state_hash>;
+  using state_set = ankerl::unordered_dense::set<car_state, car_state_hash>;
 
   constexpr static auto const kDebug = false;
-  constexpr static auto const kDebugMaps = false;  // Set to true to see adjacency map structure
 
   struct get_bucket {
     cost_t operator()(label const& l) { return l.cost(); }
@@ -154,9 +154,6 @@ struct bidirectional_car_dijkstra {
 
   static ch_level_t get_level(car_state const& state) {
     auto it = car_state_levels_.find(state);
-    if (it == car_state_levels_.end()) {
-        std::cout << "Returned Level 0\n";
-    }
     return it != car_state_levels_.end() ? it->second : 0;
   }
 
@@ -174,11 +171,7 @@ struct bidirectional_car_dijkstra {
     legal_successors_.clear();
     legal_predecessors_.clear();
     legal_incoming_.clear();
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Starting unified adjacency preprocessing for " << w.n_nodes() << " nodes...\n";
-    }
-    
+
     // Enumerate all nodes in the graph
     for (auto n = node_idx_t{0}; n < node_idx_t{w.n_nodes()}; ++n) {
       // For each node, get all valid car node states (node_idx_t, way_pos_t, direction)
@@ -186,46 +179,6 @@ struct bidirectional_car_dijkstra {
         // Build unified adjacency - forward pass populates all three maps
         build_adjacency_for_node_static<direction::kForward>(w, r, car_node, blocked, sharing, elevations);
       });
-    }
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Unified adjacency preprocessing completed: " 
-                << legal_successors_.size() << " successor entries, "
-                << legal_predecessors_.size() << " predecessor entries, "
-                << legal_incoming_.size() << " incoming entries\n";
-    }
-    
-    if constexpr (kDebugMaps) {
-      // Print sample entries for debugging
-      std::cout << "\nSample successor entries:\n";
-      auto succ_count = 0;
-      for (auto const& [key, transitions] : legal_successors_) {
-        if (succ_count >= 5) break;
-        std::cout << "  Key {n=" << to_idx(key.n) << ", way=" << static_cast<int>(key.way) 
-                  << ", dir=" << (key.dir == direction::kForward ? "FWD" : "BWD") 
-                  << "} -> " << transitions.size() << " transitions\n";
-        for (auto const& t : transitions) {
-          std::cout << "    -> n=" << to_idx(t.target.n_) << ", way=" << static_cast<int>(t.target.way_)
-                    << ", dir=" << (t.target.dir_ == direction::kForward ? "FWD" : "BWD") 
-                    << ", cost=" << t.cost << "\n";
-        }
-        ++succ_count;
-      }
-      
-      std::cout << "\nSample predecessor entries:\n";
-      auto pred_count = 0;
-      for (auto const& [key, transitions] : legal_predecessors_) {
-        if (pred_count >= 5) break;
-        std::cout << "  Key {n=" << to_idx(key.n) << ", way=" << static_cast<int>(key.way) 
-                  << ", dir=" << (key.dir == direction::kForward ? "FWD" : "BWD") 
-                  << "} -> " << transitions.size() << " transitions\n";
-        for (auto const& t : transitions) {
-          std::cout << "    -> n=" << to_idx(t.target.n_) << ", way=" << static_cast<int>(t.target.way_)
-                    << ", dir=" << (t.target.dir_ == direction::kForward ? "FWD" : "BWD") 
-                    << ", cost=" << t.cost << "\n";
-        }
-        ++pred_count;
-      }
     }
   }
 
@@ -270,19 +223,6 @@ struct bidirectional_car_dijkstra {
     legal_successors_[from_state].push_back(shortcut_forward);
     legal_predecessors_[to_state].push_back(shortcut_backward);
     legal_incoming_[to_state].push_back(shortcut_forward);
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Added shortcut: {n=" << to_idx(from_state.n) 
-                << ", way=" << static_cast<int>(from_state.way)
-                << ", dir=" << (from_state.dir == direction::kForward ? "FWD" : "BWD")
-                << "} -> {n=" << to_idx(to_state.n)
-                << ", way=" << static_cast<int>(to_state.way)
-                << ", dir=" << (to_state.dir == direction::kForward ? "FWD" : "BWD")
-                << "} via {n=" << to_idx(via_state.n)
-                << ", way=" << static_cast<int>(via_state.way)
-                << ", dir=" << (via_state.dir == direction::kForward ? "FWD" : "BWD")
-                << "} cost=" << total_cost << std::endl;
-    }
   }
 
   static edge_transition const* find_shortcut(car_state const& from_state,
@@ -306,56 +246,6 @@ struct bidirectional_car_dijkstra {
     return nullptr;
   }
 
- /* static void assign_random_levels() {
-    car_state_levels_.clear();
-    
-    // Collect all unique car_states from both successor and predecessor maps
-    std::vector<car_state> all_states;
-    for (auto const& [state, _] : legal_successors_) {
-      all_states.push_back(state);
-    }
-    for (auto const& [state, _] : legal_predecessors_) {
-      if (car_state_levels_.find(state) == car_state_levels_.end()) {
-        all_states.push_back(state);
-      }
-    }
-    
-    // Remove duplicates
-    std::sort(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
-      if (a.n != b.n) return a.n < b.n;
-      if (a.way != b.way) return a.way < b.way;
-      return a.dir < b.dir;
-    });
-    all_states.erase(std::unique(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
-      return a.n == b.n && a.way == b.way && a.dir == b.dir;
-    }), all_states.end());
-    
-    // Assign random levels
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::vector<ch_level_t> levels;
-    for (ch_level_t i = 1; i <= static_cast<ch_level_t>(all_states.size()); ++i) {
-      levels.push_back(i);
-    }
-    std::shuffle(levels.begin(), levels.end(), gen);
-    
-    for (size_t i = 0; i < all_states.size(); ++i) {
-      car_state_levels_[all_states[i]] = levels[i];
-    }
-    
-    // Print level of each node after assignment
-    std::cout << "Level assignment for " << all_states.size() << " car_states:\n";
-    /*for (size_t i = 0; i < all_states.size(); ++i) {
-      auto const& state = all_states[i];
-      std::cout << "Node " << to_idx(state.n) << " (way=" << static_cast<int>(state.way) 
-                << ", dir=" << (state.dir == direction::kForward ? "FWD" : "BWD") 
-                << ") -> Level " << levels[i] << "\n";
-    }
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Assigned random levels to " << all_states.size() << " car_states\n";
-    }
-  } */
 
   static void assign_random_levels() {
   car_state_levels_.clear();
@@ -374,14 +264,7 @@ struct bidirectional_car_dijkstra {
       add_state({e.target.n_, e.target.way_, e.target.dir_});
     }
   }
-  // 2) collect from predecessor map
-  /*for (auto const& [src, edges] : legal_predecessors_) {
-    add_state(src);
-    for (auto const& e : edges) {
-      add_state({e.target.n_, e.target.way_, e.target.dir_});
-    }
-  }*/
-  // 3) collect from incoming map (covers targets explicitly)
+  // 2) collect from incoming map (covers targets explicitly)
   for (auto const& [src, edges] : legal_incoming_) {
     add_state(src);
     for (auto const& e : edges) {
@@ -403,178 +286,6 @@ struct bidirectional_car_dijkstra {
   for (size_t i = 0; i < all_states.size(); ++i) {
     car_state_levels_[all_states[i]] = levels[i];
   }
-
-  // Optional: validation
-  // verify_levels_complete();  // (see below)
-}
-
-
-  // Local witness search for contraction - only consider nodes with level >= min_level, exclude contracted_node
-  static std::unordered_map<car_state, cost_t, car_state_hash> 
-  local_witness_search(car_state const& source, 
-                      std::vector<car_state> const& targets, 
-                      ch_level_t min_level,
-                      car_state const& contracted_node,
-                      cost_t max_cost) {
-    std::unordered_map<car_state, cost_t, car_state_hash> distances;
-    std::priority_queue<std::pair<cost_t, car_state>, 
-                       std::vector<std::pair<cost_t, car_state>>,
-                       std::greater<std::pair<cost_t, car_state>>> pq;
-    
-    // Initialize distances
-    distances[source] = 0;
-    pq.push({0, source});
-    
-    std::unordered_set<car_state, car_state_hash> settled;
-    std::unordered_set<car_state, car_state_hash> target_set(targets.begin(), targets.end());
-    size_t targets_settled = 0;
-    
-    while (!pq.empty() && targets_settled < targets.size()) {
-      auto [current_cost, current_state] = pq.top();
-      pq.pop();
-      
-      if (settled.count(current_state)) continue;
-      if (current_cost > max_cost) break;
-      
-      settled.insert(current_state);
-      
-      // Check if this is a target
-      if (target_set.count(current_state)) {
-        targets_settled++;
-      }
-      
-      // Find outgoing edges from current_state
-      auto succ_it = legal_successors_.find(current_state);
-      if (succ_it != legal_successors_.end()) {
-        for (auto const& edge : succ_it->second) {
-          car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
-          
-          // Skip if this is the contracted node
-          if (next_state.n == contracted_node.n && 
-              next_state.way == contracted_node.way && 
-              next_state.dir == contracted_node.dir) {
-            continue;
-          }
-          
-          // Skip if level is too low (exclude contracted node and lower levels)
-          if (get_level(next_state) <= min_level) {
-            continue;
-          }
-          
-          // Skip if already settled
-          if (settled.count(next_state)) continue;
-          
-          cost_t new_cost = current_cost + edge.cost;
-          if (new_cost > max_cost) continue;
-          
-          auto dist_it = distances.find(next_state);
-          if (dist_it == distances.end() || new_cost < dist_it->second) {
-            distances[next_state] = new_cost;
-            pq.push({new_cost, next_state});
-          }
-        }
-      }
-    }
-    
-    return distances;
-  }
-
-  // Validation functions to ensure adjacency map consistency
-  static void validate_adjacency_maps() {
-    std::cout << "\n=== VALIDATING ADJACENCY MAP CONSISTENCY ===\n";
-    
-    size_t forward_edges = 0;
-    size_t reverse_mismatches = 0;
-    size_t cost_mismatches = 0;
-    size_t incoming_mismatches = 0;
-    
-    // For every forward edge u -> v, verify:
-    // 1. Corresponding reverse edge v -> u exists in legal_predecessors_[v]
-    // 2. Same cost between forward and reverse edges  
-    // 3. Corresponding incoming edge exists in legal_incoming_[v]
-    for (auto const& [source_state, transitions] : legal_successors_) {
-      for (auto const& forward_edge : transitions) {
-        forward_edges++;
-        
-        car_state target_state{forward_edge.target.n_, forward_edge.target.way_, forward_edge.target.dir_};
-        
-        // Check if reverse edge exists in predecessors
-        auto pred_it = legal_predecessors_.find(target_state);
-        bool found_reverse = false;
-        cost_t reverse_cost = 0;
-        
-        if (pred_it != legal_predecessors_.end()) {
-          for (auto const& backward_edge : pred_it->second) {
-            if (backward_edge.target.n_ == source_state.n &&
-                backward_edge.target.way_ == source_state.way &&
-                backward_edge.target.dir_ == source_state.dir) {
-              found_reverse = true;
-              reverse_cost = backward_edge.cost;
-              break;
-            }
-          }
-        }
-        
-        if (!found_reverse) {
-          reverse_mismatches++;
-          if (reverse_mismatches <= 5) {
-            std::cout << "MISSING REVERSE: Forward edge {n=" << to_idx(source_state.n) 
-                      << ",way=" << static_cast<int>(source_state.way)
-                      << ",dir=" << (source_state.dir == direction::kForward ? "FWD" : "BWD")
-                      << "} -> {n=" << to_idx(target_state.n)
-                      << ",way=" << static_cast<int>(target_state.way) 
-                      << ",dir=" << (target_state.dir == direction::kForward ? "FWD" : "BWD")
-                      << "} has no reverse edge\n";
-          }
-        } else if (forward_edge.cost != reverse_cost) {
-          cost_mismatches++;
-          if (cost_mismatches <= 5) {
-            std::cout << "COST MISMATCH: Edge costs differ - forward=" << forward_edge.cost 
-                      << " vs reverse=" << reverse_cost << "\n";
-          }
-        }
-        
-        // Check if incoming edge exists
-        auto inc_it = legal_incoming_.find(target_state);
-        bool found_incoming = false;
-        
-        if (inc_it != legal_incoming_.end()) {
-          for (auto const& incoming_edge : inc_it->second) {
-            if (incoming_edge.source.n_ == source_state.n &&
-                incoming_edge.source.way_ == source_state.way &&
-                incoming_edge.source.dir_ == source_state.dir &&
-                incoming_edge.cost == forward_edge.cost) {
-              found_incoming = true;
-              break;
-            }
-          }
-        }
-        
-        if (!found_incoming) {
-          incoming_mismatches++;
-          if (incoming_mismatches <= 5) {
-            std::cout << "MISSING INCOMING: Forward edge not found in incoming map for target\n";
-          }
-        }
-      }
-    }
-    
-    std::cout << "\nValidation Results:\n";
-    std::cout << "  Total forward edges: " << forward_edges << "\n";
-    std::cout << "  Missing reverse edges: " << reverse_mismatches << "\n";
-    std::cout << "  Cost mismatches: " << cost_mismatches << "\n";
-    std::cout << "  Missing incoming edges: " << incoming_mismatches << "\n";
-    std::cout << "  Map sizes - successors: " << legal_successors_.size() 
-              << ", predecessors: " << legal_predecessors_.size()
-              << ", incoming: " << legal_incoming_.size() << "\n";
-    
-    if (reverse_mismatches == 0 && cost_mismatches == 0 && incoming_mismatches == 0) {
-      std::cout << "✓ ADJACENCY MAPS ARE CONSISTENT!\n";
-    } else {
-      std::cout << "✗ ADJACENCY MAPS HAVE INCONSISTENCIES!\n";
-    }
-    
-    std::cout << "==========================================\n";
   }
 
   static void preprocess(ways const& w,
@@ -584,275 +295,11 @@ struct bidirectional_car_dijkstra {
                         elevation_storage const* elevations = nullptr) {
     // Step 1: Build initial adjacency (normal edges)
     build_initial_adjacency(w, r, blocked, sharing, elevations);
-    
-    // Step 1.5: Validate initial adjacency consistency
-    if constexpr (kDebugMaps) {
-      validate_adjacency_maps();
-    }
-    
+
     // Step 2: Assign random levels
     assign_random_levels();
-    
-    // Step 3: Contract nodes
-    //contract_nodes(w, r, blocked, sharing, elevations);
-    
-    // Step 3.5: Validate final adjacency consistency after contraction
-    if constexpr (kDebugMaps) {
-      validate_adjacency_maps();
-    }
-    
-    // Step 4: Print first 10 nodes by level after preprocessing
-    print_first_10_nodes_by_level();
   }
 
-  static void print_first_10_nodes_by_level() {
-    // Create a vector of states sorted by level
-    std::vector<std::pair<car_state, ch_level_t>> states_by_level;
-    for (auto const& [state, level] : car_state_levels_) {
-      states_by_level.emplace_back(state, level);
-    }
-    
-    // Sort by level
-    std::sort(states_by_level.begin(), states_by_level.end(), 
-              [](auto const& a, auto const& b) { return a.second < b.second; });
-    
-    std::cout << "\n=== ADJACENCY DATA FOR FIRST 10 NODES BY LEVEL ===\n";
-    std::cout << "Total nodes: " << states_by_level.size() << std::endl;
-    std::cout << "Successors map size: " << legal_successors_.size() << std::endl;
-    std::cout << "Predecessors map size: " << legal_predecessors_.size() << std::endl;
-    std::cout << "Incoming map size: " << legal_incoming_.size() << std::endl;
-    
-    // Print first 10 nodes by level
-    for (size_t i = 330; i < std::min(static_cast<size_t>(340), states_by_level.size()); ++i) {
-      const auto& [state, level] = states_by_level[i];
-      
-      std::cout << "\n--- NODE " << (i + 1) << " ---\n";
-      std::cout << "State: {n=" << to_idx(state.n) 
-                << ", way=" << static_cast<int>(state.way) 
-                << ", dir=" << (state.dir == direction::kForward ? "FWD" : "BWD") 
-                << "}\n";
-      std::cout << "Level: " << level << "\n";
-      
-      // Print legal_successors
-      std::cout << "\nLEGAL_SUCCESSORS:\n";
-      auto succ_it = legal_successors_.find(state);
-      if (succ_it != legal_successors_.end()) {
-        std::cout << "  Count: " << succ_it->second.size() << "\n";
-        for (size_t j = 0; j < succ_it->second.size(); ++j) {
-          const auto& edge = succ_it->second[j];
-          std::cout << "  [" << j << "] -> {n=" << to_idx(edge.target.n_) 
-                    << ", way=" << static_cast<int>(edge.target.way_)
-                    << ", dir=" << (edge.target.dir_ == direction::kForward ? "FWD" : "BWD") 
-                    << "} cost=" << edge.cost 
-                    << " dist=" << edge.dist
-                    << " way_idx=" << to_idx(edge.way)
-                    << " from=" << edge.from 
-                    << " to=" << edge.to;
-          if (edge.is_shortcut) {
-            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
-                      << ", way=" << static_cast<int>(edge.via_state.way)
-                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
-                      << "}]";
-          }
-          std::cout << "\n";
-        }
-      } else {
-        std::cout << "  Count: 0 (not found in map)\n";
-      }
-      
-      // Print legal_predecessors
-      std::cout << "\nLEGAL_PREDECESSORS:\n";
-      auto pred_it = legal_predecessors_.find(state);
-      if (pred_it != legal_predecessors_.end()) {
-        std::cout << "  Count: " << pred_it->second.size() << "\n";
-        for (size_t j = 0; j < pred_it->second.size(); ++j) {
-          const auto& edge = pred_it->second[j];
-          std::cout << "  [" << j << "] -> {n=" << to_idx(edge.target.n_) 
-                    << ", way=" << static_cast<int>(edge.target.way_)
-                    << ", dir=" << (edge.target.dir_ == direction::kForward ? "FWD" : "BWD") 
-                    << "} cost=" << edge.cost 
-                    << " dist=" << edge.dist
-                    << " way_idx=" << to_idx(edge.way)
-                    << " from=" << edge.from 
-                    << " to=" << edge.to;
-          if (edge.is_shortcut) {
-            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
-                      << ", way=" << static_cast<int>(edge.via_state.way)
-                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
-                      << "}]";
-          }
-          std::cout << "\n";
-        }
-      } else {
-        std::cout << "  Count: 0 (not found in map)\n";
-      }
-      
-      // Print legal_incoming
-      std::cout << "\nLEGAL_INCOMING:\n";
-      auto inc_it = legal_incoming_.find(state);
-      if (inc_it != legal_incoming_.end()) {
-        std::cout << "  Count: " << inc_it->second.size() << "\n";
-        for (size_t j = 0; j < inc_it->second.size(); ++j) {
-          const auto& edge = inc_it->second[j];
-          std::cout << "  [" << j << "] <- {n=" << to_idx(edge.source.n_) 
-                    << ", way=" << static_cast<int>(edge.source.way_)
-                    << ", dir=" << (edge.source.dir_ == direction::kForward ? "FWD" : "BWD") 
-                    << "} cost=" << edge.cost 
-                    << " dist=" << edge.dist
-                    << " way_idx=" << to_idx(edge.way)
-                    << " from=" << edge.from 
-                    << " to=" << edge.to;
-          if (edge.is_shortcut) {
-            std::cout << " [SHORTCUT via {n=" << to_idx(edge.via_state.n)
-                      << ", way=" << static_cast<int>(edge.via_state.way)
-                      << ", dir=" << (edge.via_state.dir == direction::kForward ? "FWD" : "BWD")
-                      << "}]";
-          }
-          std::cout << "\n";
-        }
-      } else {
-        std::cout << "  Count: 0 (not found in map)\n";
-      }
-    }
-    
-    std::cout << "\n=== END ADJACENCY DATA ===\n";
-  }
-
-private:
-  static void contract_nodes(ways const& w,
-                           ways::routing const& r,
-                           bitvec<node_idx_t> const* blocked,
-                           sharing_data const* sharing,
-                           elevation_storage const* elevations) {
-    // Get all car_states sorted by level
-    std::vector<std::pair<car_state, ch_level_t>> states_by_level;
-    for (auto const& [state, level] : car_state_levels_) {
-      states_by_level.emplace_back(state, level);
-    }
-    
-    std::sort(states_by_level.begin(), states_by_level.end(), 
-              [](auto const& a, auto const& b) { return a.second < b.second; });
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Starting contraction of " << states_by_level.size() << " car_states...\n";
-    }
-    
-    // Always print the number of levels at the start
-    std::cout << "Number of levels: " << states_by_level.size() << std::endl;
-    
-    size_t contracted = 0;
-    for (auto const& [contracted_state, contracted_level] : states_by_level) {
-      // Always print the level of the currently contracted node
-      std::cout << "Contracting node level: " << contracted_level << " (node " << contracted + 1 << "/" << states_by_level.size() << ")" << std::endl;
-      
-      contract_single_node(contracted_state, contracted_level);
-      ++contracted;
-      
-      if constexpr (kDebugMaps) {
-        if (contracted % 1000 == 0) {
-          std::cout << "Contracted " << contracted << " / " << states_by_level.size() << " nodes\n";
-        }
-      }
-    }
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Contraction completed!\n";
-    }
-  }
-
-  static void contract_single_node(car_state const& u, ch_level_t u_level) {
-    // Find incoming neighbors with level > u_level
-    std::vector<car_state> incoming_neighbors;
-    std::vector<cost_t> incoming_costs;
-    
-    auto in_it = legal_incoming_.find(u);
-    if (in_it != legal_incoming_.end()) {
-      for (auto const& edge : in_it->second) {
-        car_state v_state{edge.source.n_, edge.source.way_, edge.source.dir_};
-        if (get_level(v_state) > u_level) {
-          incoming_neighbors.push_back(v_state);
-          incoming_costs.push_back(edge.cost);
-        }
-      }
-    }
-    
-    // Find outgoing neighbors with level > u_level  
-    std::vector<car_state> outgoing_neighbors;
-    std::vector<cost_t> outgoing_costs;
-    std::vector<edge_transition> outgoing_edges;
-    
-    auto succ_it = legal_successors_.find(u);
-    if (succ_it != legal_successors_.end()) {
-      for (auto const& edge : succ_it->second) {
-        car_state w_state{edge.target.n_, edge.target.way_, edge.target.dir_};
-        if (get_level(w_state) > u_level) {
-          outgoing_neighbors.push_back(w_state);
-          outgoing_costs.push_back(edge.cost);
-          outgoing_edges.push_back(edge);
-        }
-      }
-    }
-    
-    // For each incoming neighbor, run witness search to all outgoing neighbors
-    for (size_t i = 0; i < incoming_neighbors.size(); ++i) {
-      car_state const& v_state = incoming_neighbors[i];
-      cost_t v_to_u_cost = incoming_costs[i];
-      
-      // Skip self-loops  
-      std::vector<car_state> targets;
-      std::vector<size_t> target_indices;
-      for (size_t j = 0; j < outgoing_neighbors.size(); ++j) {
-        if (outgoing_neighbors[j].n != v_state.n || 
-            outgoing_neighbors[j].way != v_state.way || 
-            outgoing_neighbors[j].dir != v_state.dir) {
-          targets.push_back(outgoing_neighbors[j]);
-          target_indices.push_back(j);
-        }
-      }
-      
-      if (targets.empty()) continue;
-      
-      // Calculate maximum possible shortcut cost
-      cost_t max_shortcut_cost = v_to_u_cost;  
-      for (size_t j : target_indices) {
-        max_shortcut_cost = std::max(max_shortcut_cost, static_cast<cost_t>(v_to_u_cost + outgoing_costs[j]));
-      }
-      
-      // Run witness search
-      auto distances = local_witness_search(v_state, targets, u_level, u, max_shortcut_cost);
-      
-      // Check each target and add shortcuts if needed
-      for (size_t idx = 0; idx < target_indices.size(); ++idx) {
-        size_t j = target_indices[idx];
-        car_state const& w_state = outgoing_neighbors[j];
-        cost_t shortcut_cost = v_to_u_cost + outgoing_costs[j];
-        
-        auto dist_it = distances.find(w_state);
-        cost_t witness_cost = (dist_it != distances.end()) ? dist_it->second : kInfeasible;
-        
-        // Add shortcut if witness path is more expensive or doesn't exist
-        if (witness_cost > shortcut_cost) {
-          // Find the incoming edge from v to u for reconstruction
-          edge_transition v_to_u_edge;
-          auto v_succ_it = legal_successors_.find(v_state);
-          bool found_incoming = false;
-          if (v_succ_it != legal_successors_.end()) {
-            for (auto const& edge : v_succ_it->second) {
-              if (edge.target.n_ == u.n && edge.target.way_ == u.way && edge.target.dir_ == u.dir) {
-                v_to_u_edge = edge;
-                found_incoming = true;
-                break;
-              }
-            }
-          }
-          
-          if (found_incoming) {
-            add_shortcut(v_state, w_state, u, shortcut_cost, v_to_u_edge, outgoing_edges[j]);
-          }
-        }
-      }
-    }
-  }
 
 public:
 
@@ -905,64 +352,26 @@ public:
     
     car_state source_key{n.n_, n.way_, n.dir_};
     
-    if constexpr (kDebugMaps) {
-      std::cout << "\n=== Building unified adjacency for node ===\n";
-      std::cout << "Source: ";
-      n.print(std::cout, w);
-      std::cout << "\n";
-      std::cout << "car_state key: {n=" << to_idx(source_key.n) 
-                << ", way=" << static_cast<int>(source_key.way) 
-                << ", dir=" << (source_key.dir == direction::kForward ? "FWD" : "BWD") 
-                << "}\n";
-    }
-    
     // Get all forward adjacent nodes and populate all three maps simultaneously
     car::adjacent<direction::kForward, WithBlocked>(
         r, n, blocked, sharing, elevations,
         [&](node const target, std::uint32_t const cost, distance_t const dist,
             way_idx_t const way, std::uint16_t const from, std::uint16_t const to,
             elevation_storage::elevation const, bool const) {
-          
-          if constexpr (kDebugMaps) {
-            std::cout << "  -> Adjacent: ";
-            target.print(std::cout, w);
-            std::cout << " [cost=" << cost << ", dist=" << dist 
-                      << ", way=" << to_idx(way) << ", from=" << from 
-                      << ", to=" << to << "]\n";
-          }
-          
+
           car_state target_key{target.n_, target.way_, target.dir_};
-          
+
           // Create forward edge transition
           edge_transition forward_edge{n, target, static_cast<cost_t>(cost), dist, way, from, to};
-          
+
           // Create corresponding backward edge transition (same cost, reversed source/target)
           edge_transition backward_edge{target, n, static_cast<cost_t>(cost), dist, way, to, from};
-          
+
           // Update all three maps simultaneously to ensure perfect symmetry
           legal_successors_[source_key].push_back(forward_edge);
           legal_incoming_[target_key].push_back(forward_edge);
           legal_predecessors_[target_key].push_back(backward_edge);
-          
-          if constexpr (kDebugMaps) {
-            std::cout << "    Added to successors[" << to_idx(source_key.n) << "," 
-                      << static_cast<int>(source_key.way) << "," 
-                      << (source_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
-            std::cout << "    Added to incoming[" << to_idx(target_key.n) << "," 
-                      << static_cast<int>(target_key.way) << "," 
-                      << (target_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
-            std::cout << "    Added to predecessors[" << to_idx(target_key.n) << "," 
-                      << static_cast<int>(target_key.way) << "," 
-                      << (target_key.dir == direction::kForward ? "FWD" : "BWD") << "]\n";
-          }
         });
-    
-    if constexpr (kDebugMaps) {
-      auto succ_it = legal_successors_.find(source_key);
-      int succ_count = (succ_it != legal_successors_.end()) ? succ_it->second.size() : 0;
-      std::cout << "Stored " << succ_count << " forward transitions for this node\n";
-      std::cout << "=================================\n";
-    }
   }
 
   template <direction SearchDir, bool WithBlocked>
@@ -992,11 +401,6 @@ public:
       l.get_node().print(std::cout, w);
       std::cout << "starting" << l.get_node().n_ << std::endl;
     }
-    if constexpr (kDebugMaps) {
-      std::cout << "\n+++ Adding START node: ";
-      l.get_node().print(std::cout, w);
-      std::cout << " with cost=" << l.cost() << "\n";
-    }
     add(w, l, direction::kForward, cost1_, pq1_, sharing);
   }
 
@@ -1004,11 +408,6 @@ public:
     if (kDebug) {
       l.get_node().print(std::cout, w);
       std::cout << "ending" << l.get_node().n_ << std::endl;
-    }
-    if constexpr (kDebugMaps) {
-      std::cout << "\n+++ Adding END node: ";
-      l.get_node().print(std::cout, w);
-      std::cout << " with cost=" << l.cost() << "\n";
     }
     add(w, l, direction::kBackward, cost2_, pq2_, sharing);
   }
@@ -1061,17 +460,72 @@ public:
       }
     };
 
-    auto const opposite_cost_map =
-        opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
-    auto const opposite_candidate = opposite_cost_map->find(make_car_state(curr));
     auto const curr_cost = get_cost<SearchDir>(curr);
-    
-    if (opposite_candidate != end(*opposite_cost_map)) {
-      auto const other_cost = opposite_candidate->second.cost(curr);
-      if (other_cost != kInfeasible) {
-        evaluate_meetpoint(curr_cost, other_cost, curr, curr);
-      } 
-    }
+    auto const handle_end_of_way_meetpoint = [&]() {
+      auto const opposite_cost_map =
+          opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
+      auto const opposite_candidate = opposite_cost_map->find(make_car_state(curr));
+      if (opposite_candidate != end(*opposite_cost_map)) {
+        auto const other_cost = opposite_candidate->second.cost(curr);
+        if (other_cost != kInfeasible) {
+          evaluate_meetpoint(curr_cost, other_cost, curr, curr);
+        } else {
+                                      std::cout << "REACHED\n";
+
+          auto const pred_it = costs.find(make_car_state(curr));
+          if (pred_it == end(costs)) {
+            return;
+          }
+          auto const pred = pred_it->second.pred(curr);
+          if (!pred.has_value()) {
+            return;
+          }
+          car::template adjacent<opposite(SearchDir), WithBlocked>(
+              r, curr, blocked, sharing, elevations,
+              [&](node const neighbor, std::uint32_t const, distance_t,
+                  way_idx_t const, std::uint16_t, std::uint16_t,
+                  elevation_storage::elevation const, bool const) {
+                if (neighbor.get_key() != pred->get_key()) {
+                  return;
+                }
+                auto const opposite_it =
+                    opposite_cost_map->find(make_car_state(neighbor));
+                if (opposite_it == end(*opposite_cost_map)) {
+                  return;
+                }
+                auto const opposite_curr = opposite_it->second.pred(neighbor);
+                if (!opposite_curr.has_value() ||
+                    opposite_curr->get_key() != curr.get_key()) {
+                  return;
+                }
+                auto const opposite_curr_cost =
+                    opposite_candidate->second.cost(*opposite_curr);
+                auto const pred_cost = get_cost<SearchDir>(*pred);
+                auto const opposite_pred_cost =
+                    opposite_it->second.cost(neighbor);
+                auto const evaluate_meetpoint_with_potential_u_turn_cost =
+                    [&](cost_t const cost_1, cost_t const cost_2,
+                        node const meet_1, node const meet_2) {
+                      evaluate_meetpoint(
+                          cost_1, cost_2,
+                          SearchDir == direction::kForward ? meet_1 : meet_2,
+                          SearchDir == direction::kForward ? meet_2 : meet_1);
+                    };
+                            std::cout << "REACHED\n";
+                if (pred_cost + opposite_pred_cost >
+                    curr_cost + opposite_curr_cost) {
+                  evaluate_meetpoint_with_potential_u_turn_cost(
+                      pred_cost, opposite_pred_cost, *pred, neighbor);
+                } else {
+                  evaluate_meetpoint_with_potential_u_turn_cost(
+                      curr_cost, opposite_curr_cost, curr, *opposite_curr);
+                }
+              });
+        }
+      }
+    };
+
+    handle_end_of_way_meetpoint();
   }
 
   template <direction SearchDir, bool WithBlocked>
@@ -1090,17 +544,10 @@ public:
     auto const l = pq.pop();
     auto const curr = l.get_node();
     auto const curr_cost = get_cost<SearchDir>(curr);
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "  EXTRACT ";
-      l.get_node().print(std::cout, w);
-      std::cout << " with cost=" << l.cost() << " (actual_cost=" << curr_cost << ")\n";
-    }
+
+
     
     if (curr_cost < l.cost()) {
-      if constexpr (kDebugMaps) {
-        std::cout << "  Skipping due to dominated cost\n";
-      }
       return true;
     }
     
@@ -1115,32 +562,7 @@ public:
     auto const& adj_map = (SearchDir == direction::kForward) ? legal_successors_ : legal_predecessors_;
     
     auto it = adj_map.find(curr_key);
-    if constexpr (kDebugMaps) {
-      std::cout << "  Looking up adjacency for key {n=" << to_idx(curr_key.n) 
-                << ", way=" << static_cast<int>(curr_key.way) 
-                << ", dir=" << (curr_key.dir == direction::kForward ? "FWD" : "BWD") 
-                << "} in " << (SearchDir == direction::kForward ? "successors" : "predecessors") << "\n";
-      
-      if (it == adj_map.end()) {
-        std::cout << "  WARNING: No adjacency found for this key!\n";
-      } else {
-        std::cout << "  Found " << it->second.size() << " adjacent transitions\n";
-      }
-    }
     
-    if constexpr (kDebugMaps) {
-      if (it != adj_map.end() && !it->second.empty()) {
-        std::cout << "\n>>> Using adjacency map for ";
-        curr.print(std::cout, w);
-        std::cout << "\n    Map type: " << (SearchDir == direction::kForward ? "legal_successors" : "legal_predecessors");
-        std::cout << "\n    Found " << it->second.size() << " transitions:\n";
-        for (auto const& edge : it->second) {
-          std::cout << "      -> ";
-          edge.target.print(std::cout, w);
-          std::cout << " [cost=" << edge.cost << "]\n";
-        }
-      }
-    }
     if (it != adj_map.end()) {
       for (auto const& edge : it->second) {
         if constexpr (kDebug) {
@@ -1152,20 +574,14 @@ public:
         car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
         ch_level_t curr_level = get_level(curr_key);
         ch_level_t next_level = get_level(next_state);
-        //bool same_node = (next_state.n == curr_key.n);
-        
+
         // Forward search: only upward edges (next_level > curr_level)
         // Backward search: only downward edges (curr_level > next_level)
-        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ? 
-                          (next_level > curr_level) : 
-                          (curr_level > next_level);*/
+        bool level_valid = (SearchDir == direction::kForward) ?
+                          (next_level > curr_level) :
+                          (curr_level > next_level);
         
         if (!level_valid) {
-          if constexpr (kDebugMaps) {
-            std::cout << " -> LEVEL FILTERED (curr=" << curr_level 
-                      << ", next=" << next_level << ", dir=" 
-                      << (SearchDir == direction::kForward ? "FWD" : "BWD") << ")\n";
-          }
           //continue;
         }
 
@@ -1231,10 +647,6 @@ public:
            bitvec<node_idx_t> const* blocked,
            sharing_data const* sharing,
            elevation_storage const* elevations) {
-    if constexpr (kDebugMaps) {
-      std::cout << "\n=== Starting bidirectional search with max_cost=" << max << " ===\n";
-      std::cout << "Initial PQ sizes: pq1=" << pq1_.size() << ", pq2=" << pq2_.size() << "\n";
-    }
     
     while (!pq1_.empty() || !pq2_.empty()) {
       if (!pq1_.empty()) {

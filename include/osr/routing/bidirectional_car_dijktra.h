@@ -470,16 +470,20 @@ public:
         if (other_cost != kInfeasible) {
           evaluate_meetpoint(curr_cost, other_cost, curr, curr);
         } else {
-                                      std::cout << "REACHED\n";
+                                      std::cout << "REACHED1\n";
 
           auto const pred_it = costs.find(make_car_state(curr));
           if (pred_it == end(costs)) {
             return;
           }
+                                                std::cout << "REACHED2\n";
+
           auto const pred = pred_it->second.pred(curr);
           if (!pred.has_value()) {
             return;
           }
+                                                std::cout << "REACHED3\n";
+
           car::template adjacent<opposite(SearchDir), WithBlocked>(
               r, curr, blocked, sharing, elevations,
               [&](node const neighbor, std::uint32_t const, distance_t,
@@ -488,16 +492,22 @@ public:
                 if (neighbor.get_key() != pred->get_key()) {
                   return;
                 }
+                                                      std::cout << "REACHED4\n";
+
                 auto const opposite_it =
                     opposite_cost_map->find(make_car_state(neighbor));
                 if (opposite_it == end(*opposite_cost_map)) {
                   return;
                 }
+                                                      std::cout << "REACHED5\n";
+
                 auto const opposite_curr = opposite_it->second.pred(neighbor);
                 if (!opposite_curr.has_value() ||
                     opposite_curr->get_key() != curr.get_key()) {
                   return;
                 }
+                                                      std::cout << "REACHED6\n";
+
                 auto const opposite_curr_cost =
                     opposite_candidate->second.cost(*opposite_curr);
                 auto const pred_cost = get_cost<SearchDir>(*pred);
@@ -511,7 +521,6 @@ public:
                           SearchDir == direction::kForward ? meet_1 : meet_2,
                           SearchDir == direction::kForward ? meet_2 : meet_1);
                     };
-                            std::cout << "REACHED\n";
                 if (pred_cost + opposite_pred_cost >
                     curr_cost + opposite_curr_cost) {
                   evaluate_meetpoint_with_potential_u_turn_cost(
@@ -550,7 +559,16 @@ public:
     if (curr_cost < l.cost()) {
       return true;
     }
-    
+
+    // Node is being settled - commit finite cost to cost map
+    car_state curr_state = make_car_state(curr);
+    auto& chosen_map = (SearchDir == direction::kForward) ? chosen_edge_fwd_ : chosen_edge_bwd_;
+    auto chosen_it = chosen_map.find(curr_state);
+    node pred = (chosen_it != chosen_map.end())
+                ? chosen_it->second.source
+                : node::invalid();
+    costs[curr_state].update(l, curr, l.cost(), pred);
+
     if constexpr (kDebug) {
       std::cout << "EXTRACT ";
       l.get_node().print(std::cout, w);
@@ -594,28 +612,30 @@ public:
           }
           continue;
         }
-        if (total < max &&
-            costs[make_car_state(edge.target)].update(
-                l, edge.target, static_cast<cost_t>(total), curr)) {
+        if (total < max) {
+          // Check if this relaxation would improve the current best cost
+          car_state target_state = make_car_state(edge.target);
+          auto& cost_entry = costs[target_state];
+          auto current_target_cost = cost_entry.cost(edge.target);
 
-          auto next = label{edge.target, static_cast<cost_t>(total)};
-          next.track(l, r, edge.way, edge.target.get_node(), false);
-          pq.push(std::move(next));
+          if (static_cast<cost_t>(total) < current_target_cost) {
+            auto next = label{edge.target, static_cast<cost_t>(total)};
+            next.track(l, r, edge.way, edge.target.get_node(), false);
+            pq.push(std::move(next));
 
-          // Record the chosen transition for reconstruction
-          auto& chosen_map = (SearchDir == direction::kForward)
-                               ? chosen_edge_fwd_
-                               : chosen_edge_bwd_;
-          chosen_map[make_car_state(edge.target)] = edge;
+            // Record the chosen transition for reconstruction (but don't update cost yet)
+            auto& chosen_map = (SearchDir == direction::kForward)
+                                 ? chosen_edge_fwd_
+                                 : chosen_edge_bwd_;
+            chosen_map[target_state] = edge;
 
-          // Meetpoint checking is done after settling nodes
-
-          if constexpr (kDebug) {
-            std::cout << " -> PUSH\n";
-          }
-        } else {
-          if constexpr (kDebug) {
-            std::cout << " -> DOMINATED\n";
+            if constexpr (kDebug) {
+              std::cout << " -> PUSH\n";
+            }
+          } else {
+            if constexpr (kDebug) {
+              std::cout << " -> DOMINATED\n";
+            }
           }
         }
       }

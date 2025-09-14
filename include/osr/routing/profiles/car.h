@@ -304,7 +304,7 @@ static void adjacent_ch(ways::routing const& w,
           continue;
         }
         auto const target = node{n.n_, from_way_pos, dir};
-        fn(target, base +  car::kUturnPenalty, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);  // base + car::kUturnPenalty
+        fn(target, base, 0U, from_way, 0U, 0U, elevation_storage::elevation{}, false);  // base + car::kUturnPenalty
       }
     }
 

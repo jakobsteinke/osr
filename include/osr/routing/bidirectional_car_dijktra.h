@@ -867,11 +867,15 @@ public:
     cost2_.clear();
     chosen_edge_fwd_.clear();
     chosen_edge_bwd_.clear();
+    cross_node_pred_fwd_.clear();
+    cross_node_pred_bwd_.clear();
      // heuristic: assume a few thousand states per small graph
     cost1_.reserve(4096);
     cost2_.reserve(4096);
     chosen_edge_fwd_.reserve(4096);
     chosen_edge_bwd_.reserve(4096);
+    cross_node_pred_fwd_.reserve(4096);
+    cross_node_pred_bwd_.reserve(4096);
     clear_mp();
     start_loc_ = start_loc;
     end_loc_ = end_loc;
@@ -1153,21 +1157,52 @@ public:
         ch_level_t curr_level = get_level(curr_key);
         ch_level_t next_level = get_level(next_state);
         //bool same_node = (next_state.n == curr_key.n);
-        
+
         // Forward search: only upward edges (next_level > curr_level)
         // Backward search: only downward edges (curr_level > next_level)
-        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ? 
-                          (next_level > curr_level) : 
+        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ?
+                          (next_level > curr_level) :
                           (curr_level > next_level);*/
-        
+
         if (!level_valid) {
           if constexpr (kDebugMaps) {
-            std::cout << " -> LEVEL FILTERED (curr=" << curr_level 
-                      << ", next=" << next_level << ", dir=" 
+            std::cout << " -> LEVEL FILTERED (curr=" << curr_level
+                      << ", next=" << next_level << ", dir="
                       << (SearchDir == direction::kForward ? "FWD" : "BWD") << ")\n";
           }
           //continue;
         }
+
+        // Dynamic turn restriction check for same-node transitions
+        //if (true || next_state.n == curr_key.n) {
+          // Same physical node - check turn restrictions from cross-node predecessor
+          auto& cross_pred_map = (SearchDir == direction::kForward) ? cross_node_pred_fwd_ : cross_node_pred_bwd_;
+          auto pred_it = cross_pred_map.find(curr_key);
+
+          if (pred_it != cross_pred_map.end()) {
+            // We have a cross-node predecessor - get the way position for that predecessor
+            node_idx_t pred_node = pred_it->second;
+                       // std::cout << " -> AMOGUD\n";
+
+
+            // Find the way position the predecessor was on when transitioning to current node
+            auto& chosen_map = (SearchDir == direction::kForward) ? chosen_edge_fwd_ : chosen_edge_bwd_;
+            auto chosen_it = chosen_map.find(curr_key);
+
+            if (chosen_it != chosen_map.end() && chosen_it->second.source.n_ == pred_node) {
+              // Check turn restriction: at pred junction, from pred_way to target_way
+              way_pos_t pred_way = chosen_it->second.source.way_;
+              if (r.is_restricted<SearchDir>(pred_node, pred_way, next_state.way)) {  // curr_key.n
+                if constexpr (true) {
+                  std::cout << " -> TURN RESTRICTED (pred node=" << to_idx(pred_node)
+                            << " way=" << static_cast<int>(pred_way)
+                            << " -> target way=" << static_cast<int>(next_state.way) << ")\n";
+                }
+                continue;
+              }
+            }
+          }
+        //}
 
         auto const total = curr_cost + edge.cost;
         if (total >= max) {
@@ -1191,6 +1226,21 @@ public:
                                ? chosen_edge_fwd_
                                : chosen_edge_bwd_;
           chosen_map[make_car_state(edge.target)] = edge;
+
+          // Update cross-node predecessor if transitioning to different physical node
+          car_state target_state = make_car_state(edge.target);
+          if (edge.target.n_ != curr.n_) {
+            // Crossing to different physical node - update cross-node predecessor
+            auto& cross_pred_map = (SearchDir == direction::kForward) ? cross_node_pred_fwd_ : cross_node_pred_bwd_;
+            cross_pred_map[target_state] = curr.n_;
+          } else {
+            // Same physical node - inherit cross-node predecessor from current state
+            auto& cross_pred_map = (SearchDir == direction::kForward) ? cross_node_pred_fwd_ : cross_node_pred_bwd_;
+            auto curr_pred_it = cross_pred_map.find(curr_key);
+            if (curr_pred_it != cross_pred_map.end()) {
+              cross_pred_map[target_state] = curr_pred_it->second;
+            }
+          }
 
           // Meetpoint checking is done after settling nodes
 
@@ -1293,6 +1343,8 @@ public:
   bool max_reached_2_;
   chosen_edge_map chosen_edge_fwd_;  // edges used by forward search
   chosen_edge_map chosen_edge_bwd_;  // edges used by backward search
+  ankerl::unordered_dense::map<car_state, node_idx_t, car_state_hash> cross_node_pred_fwd_;  // cross-node predecessor for forward search
+  ankerl::unordered_dense::map<car_state, node_idx_t, car_state_hash> cross_node_pred_bwd_;  // cross-node predecessor for backward search
   static adjacency_map legal_successors_;
   static adjacency_map legal_predecessors_;
   static adjacency_map legal_incoming_;

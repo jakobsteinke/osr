@@ -357,15 +357,21 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   while (true) {
     auto const& e = bcd.cost1_.at(forward_n.get_key());
     auto const pred = e.pred(forward_n);
-    if (pred.has_value()) {
-      auto const expected_cost = static_cast<cost_t>(
-          e.cost(forward_n) - bcd.template get_cost<direction::kForward>(*pred));
-      forward_dist +=
-          add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
-                        forward_n, expected_cost, forward_segments, dir);
-    } else {
-      break;
+    if (!pred.has_value()) break;
+
+    auto it = bcd.chosen_edge_fwd_.find(forward_n);
+    if (it == bcd.chosen_edge_fwd_.end()) {
+      throw std::runtime_error("missing chosen forward edge during reconstruction");
     }
+
+    // Unpack the chosen edge (whether shortcut or not) into base edges
+    auto base_edges = unpack_shortcut_to_base_edges(it->second);
+
+    // Process each base edge using direct structural replay - no cost matching needed
+    for (auto const& base_edge : base_edges) {
+      forward_dist += add_path_by_edge(w, *w.r_, base_edge, forward_segments, dir);
+    }
+
     forward_n = *pred;
   }
 
@@ -394,17 +400,23 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   while (true) {
     auto const& e = bcd.cost2_.at(backward_n.get_key());
     auto const pred = e.pred(backward_n);
-    if (pred.has_value()) {
+    if (!pred.has_value()) break;
 
-      auto const expected_cost =
-          static_cast<cost_t>(e.cost(backward_n) -
-                              bcd.template get_cost<direction::kBackward>(*pred));
-      backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
-                                     *pred, backward_n, expected_cost,
-                                     backward_segments, opposite(dir));
-    } else {
-      break;
+    auto it = bcd.chosen_edge_bwd_.find(backward_n);
+    if (it == bcd.chosen_edge_bwd_.end()) {
+      throw std::runtime_error("missing chosen backward edge during reconstruction");
     }
+
+    // Unpack the chosen edge (whether shortcut or not) into base edges
+    // Normalize backward edges to match reconstruction orientation
+    auto base_edges = unpack_shortcut_to_base_edges(it->second, true);
+
+    // Process each base edge using direct structural replay - no cost matching needed
+    // IMPORTANT: backward part is reconstructed with opposite(dir)
+    for (auto const& base_edge : base_edges) {
+      backward_dist += add_path_by_edge(w, *w.r_, base_edge, backward_segments, opposite(dir));
+    }
+
     backward_n = *pred;
   }
 

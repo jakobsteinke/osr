@@ -42,28 +42,6 @@ using car_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<ca
 inline car_adjacency_map legal_successor;
 inline car_adjacency_map legal_predecessor;
 
-template <direction SearchDir, bool WithBlocked, typename Fn>
-void precomputed_adjacent(car::node const& state,
-                          bitvec<node_idx_t> const* blocked,
-                          Fn&& fn) {
-  auto const& adjacency_map = (SearchDir == direction::kForward)
-                               ? legal_successor : legal_predecessor;
-
-  auto it = adjacency_map.find(state);
-  if (it == adjacency_map.end()) return;
-
-  for (auto const& successor : it->second) {
-    if constexpr (WithBlocked) {
-      if (blocked && blocked->test(successor.target.n_)) {
-        continue;
-      }
-    }
-    fn(successor.target, successor.cost, successor.distance,
-       successor.way, successor.from, successor.to,
-       successor.elevation, successor.track);
-  }
-}
-
 struct bidirectional_car_dijkstra {
   using profile_t = car;
   using key = car::key;
@@ -264,43 +242,54 @@ struct bidirectional_car_dijkstra {
       std::cout << "\n";
     }
 
-    precomputed_adjacent<SearchDir, WithBlocked>(
-        curr, blocked,
-        [&](node const neighbor, std::uint32_t const cost, distance_t,
-            way_idx_t const way, std::uint16_t, std::uint16_t,
-            elevation_storage::elevation const, bool const track) {
-          if constexpr (kDebug) {
-            std::cout << "  NEIGHBOR ";
-            neighbor.print(std::cout, w);
+    auto const& adjacency_map = (SearchDir == direction::kForward)
+                                 ? legal_successor : legal_predecessor;
+    auto it = adjacency_map.find(curr);
+    if (it != adjacency_map.end()) {
+      for (auto const& successor : it->second) {
+        if constexpr (WithBlocked) {
+          if (blocked && blocked->test(successor.target.n_)) {
+            continue;
           }
-          auto const total = curr_cost + cost;
-          if (total >= max) {
-            if (SearchDir == direction::kForward) {
-              max_reached_1_ = true;
-            } else {
-              max_reached_2_ = true;
-            }
-            return;
-          }
-          if (total < max &&
-              costs[neighbor.get_key()].update(
-                  l, neighbor, static_cast<cost_t>(total), curr)) {
+        }
+        auto const neighbor = successor.target;
+        auto const cost = successor.cost;
+        auto const way = successor.way;
+        auto const track = successor.track;
 
-            auto next = label{neighbor, static_cast<cost_t>(total)};
-            next.track(l, r, way, neighbor.get_node(), track);
-            pq.push(std::move(next));
-
-            // Meetpoint checking is done after settling nodes
-
-            if constexpr (kDebug) {
-              std::cout << " -> PUSH\n";
-            }
+        if constexpr (kDebug) {
+          std::cout << "  NEIGHBOR ";
+          neighbor.print(std::cout, w);
+        }
+        auto const total = curr_cost + cost;
+        if (total >= max) {
+          if (SearchDir == direction::kForward) {
+            max_reached_1_ = true;
           } else {
-            if constexpr (kDebug) {
-              std::cout << " -> DOMINATED\n";
-            }
+            max_reached_2_ = true;
           }
-        });
+          continue;
+        }
+        if (total < max &&
+            costs[neighbor.get_key()].update(
+                l, neighbor, static_cast<cost_t>(total), curr)) {
+
+          auto next = label{neighbor, static_cast<cost_t>(total)};
+          next.track(l, r, way, neighbor.get_node(), track);
+          pq.push(std::move(next));
+
+          // Meetpoint checking is done after settling nodes
+
+          if constexpr (kDebug) {
+            std::cout << " -> PUSH\n";
+          }
+        } else {
+          if constexpr (kDebug) {
+            std::cout << " -> DOMINATED\n";
+          }
+        }
+      }
+    }
 
     handle_end_of_way_meetpoint<SearchDir, WithBlocked>(w, r, curr, costs, blocked, sharing, elevations);
 

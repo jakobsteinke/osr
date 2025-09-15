@@ -1,6 +1,8 @@
 #pragma once
 
 #include <limits>
+#include <random>
+#include <algorithm>
 
 #include "utl/verify.h"
 
@@ -25,6 +27,10 @@ struct car_successor {
   std::uint16_t to;
   elevation_storage::elevation elevation;
   bool track;
+
+  // CH extensions
+  bool is_shortcut = false;
+  car::node middle_node = car::node::invalid();
 };
 
 struct car_node_hash {
@@ -41,6 +47,10 @@ struct car_node_hash {
 using car_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<car_successor>, car_node_hash>;
 inline car_adjacency_map legal_successor;
 inline car_adjacency_map legal_predecessor;
+
+// CH data structures
+inline ankerl::unordered_dense::map<car::node, std::uint32_t, car_node_hash> car_node_levels;
+inline ankerl::unordered_dense::map<car::node, std::vector<car::node>, car_node_hash> legal_incoming;
 
 struct bidirectional_car_dijkstra {
   using profile_t = car;
@@ -260,6 +270,16 @@ struct bidirectional_car_dijkstra {
             continue;
           }
         }
+
+        // CH level filtering: only relax edges to higher-level car::nodes
+        auto curr_level_it = car_node_levels.find(curr);
+        auto target_level_it = car_node_levels.find(successor.target);
+        if (curr_level_it != car_node_levels.end() && target_level_it != car_node_levels.end()) {
+          if (target_level_it->second <= curr_level_it->second) {
+            continue;
+          }
+        }
+
         auto const neighbor = successor.target;
         auto const cost = successor.cost;
         auto const way = successor.way;
@@ -387,6 +407,7 @@ inline void preprocess_car_adjacency(ways const& w,
                               elevation_storage const* elevations = nullptr) {
   legal_successor.clear();
   legal_predecessor.clear();
+  legal_incoming.clear();
 
   for (node_idx_t n{0}; n < w.n_nodes(); ++n) {
     car::resolve_all(r, n, level_t{}, [&](car::node state) {
@@ -398,6 +419,7 @@ inline void preprocess_car_adjacency(ways const& w,
             elevation_storage::elevation elev, bool track) {
           legal_successor[state].emplace_back(
             car_successor{target, cost, dist, way, from, to, elev, track});
+          legal_incoming[target].emplace_back(state);
         });
 
       car::adjacent<direction::kBackward, false>(
@@ -407,9 +429,196 @@ inline void preprocess_car_adjacency(ways const& w,
             elevation_storage::elevation elev, bool track) {
           legal_predecessor[state].emplace_back(
             car_successor{target, cost, dist, way, from, to, elev, track});
+          legal_incoming[state].emplace_back(target);
         });
     });
   }
+}
+
+inline void assign_random_car_node_levels() {
+  std::vector<car::node> all_car_nodes;
+
+  // Collect all car::node states from legal_successor keys
+  for (auto const& [car_node, successors] : legal_successor) {
+    all_car_nodes.push_back(car_node);
+  }
+
+  // Shuffle and assign levels
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::shuffle(all_car_nodes.begin(), all_car_nodes.end(), gen);
+
+  car_node_levels.clear();
+  for (size_t i = 0; i < all_car_nodes.size(); ++i) {
+    car_node_levels[all_car_nodes[i]] = static_cast<std::uint32_t>(i + 1);
+  }
+}
+
+inline std::uint32_t find_edge_cost(car::node const& from, car::node const& to) {
+  if (auto it = legal_successor.find(from); it != legal_successor.end()) {
+    for (auto const& successor : it->second) {
+      if (successor.target == to) {
+        return successor.cost;
+      }
+    }
+  }
+  return std::numeric_limits<std::uint32_t>::max();
+}
+
+inline bool witness_path_exists(car::node const& from, car::node const& to,
+                               std::uint32_t const max_cost, car::node const& excluded) {
+  // Simple Dijkstra without the excluded node to find if path exists with cost <= max_cost
+  ankerl::unordered_dense::map<car::node, std::uint32_t, car_node_hash> distances;
+  auto cmp = [](std::pair<std::uint32_t, car::node> const& a,
+                std::pair<std::uint32_t, car::node> const& b) {
+    return a.first > b.first;  // min-heap: smaller costs have higher priority
+  };
+  std::vector<std::pair<std::uint32_t, car::node>> pq;
+
+  distances[from] = 0;
+  pq.emplace_back(0, from);
+
+  while (!pq.empty()) {
+    std::pop_heap(pq.begin(), pq.end(), cmp);
+    auto [cost, current] = pq.back();
+    pq.pop_back();
+
+    if (current == excluded) continue;
+    if (current == to) return cost <= max_cost;
+    if (cost > max_cost) continue;
+
+    if (auto it = distances.find(current); it != distances.end() && cost > it->second) {
+      continue;
+    }
+
+    if (auto succ_it = legal_successor.find(current); succ_it != legal_successor.end()) {
+      for (auto const& successor : succ_it->second) {
+        if (successor.target == excluded) continue;
+        if (car_node_levels[successor.target] <= car_node_levels[excluded]) continue;
+
+        auto new_cost = cost + successor.cost;
+        if (new_cost <= max_cost) {
+          if (auto dist_it = distances.find(successor.target);
+              dist_it == distances.end() || new_cost < dist_it->second) {
+            distances[successor.target] = new_cost;
+            pq.emplace_back(new_cost, successor.target);
+            std::push_heap(pq.begin(), pq.end(), cmp);
+          }
+        }
+      }
+    }
+  }
+
+  return false;
+}
+
+inline void add_shortcut(car::node const& from, car::node const& to,
+                        std::uint32_t const cost, car::node const& middle,
+                        car_successor const& template_successor) {
+  // Create shortcut successor
+  car_successor shortcut{
+    .target = to,
+    .cost = cost,
+    .distance = template_successor.distance,
+    .way = template_successor.way,
+    .from = template_successor.from,
+    .to = template_successor.to,
+    .elevation = template_successor.elevation,
+    .track = template_successor.track,
+    .is_shortcut = true,
+    .middle_node = middle
+  };
+
+  // Create corresponding predecessor entry
+  car_successor pred_shortcut{
+    .target = from,
+    .cost = cost,
+    .distance = template_successor.distance,
+    .way = template_successor.way,
+    .from = template_successor.from,
+    .to = template_successor.to,
+    .elevation = template_successor.elevation,
+    .track = template_successor.track,
+    .is_shortcut = true,
+    .middle_node = middle
+  };
+
+  // Add to all three maps
+  legal_successor[from].push_back(shortcut);
+  legal_predecessor[to].push_back(pred_shortcut);
+  legal_incoming[to].push_back(from);
+}
+
+inline void contract_car_node(car::node const& u) {
+  // Find all predecessors of u with level > level(u)
+  std::vector<car::node> valid_predecessors;
+  if (auto it = legal_incoming.find(u); it != legal_incoming.end()) {
+    for (auto const& v : it->second) {
+      if (car_node_levels[v] > car_node_levels[u]) {
+        valid_predecessors.push_back(v);
+      }
+    }
+  }
+
+  // Find all successors of u with level > level(u)
+  std::vector<car_successor> valid_successors;
+  if (auto it = legal_successor.find(u); it != legal_successor.end()) {
+    for (auto const& successor : it->second) {
+      if (car_node_levels[successor.target] > car_node_levels[u]) {
+        valid_successors.push_back(successor);
+      }
+    }
+  }
+
+  // For each predecessor-successor pair, check if shortcut needed
+  for (auto const& v : valid_predecessors) {
+    auto v_to_u_cost = find_edge_cost(v, u);
+    if (v_to_u_cost == std::numeric_limits<std::uint32_t>::max()) continue;
+
+    for (auto const& w_successor : valid_successors) {
+      auto const& w_node = w_successor.target;
+
+      // Calculate shortcut cost: cost(v,u) + cost(u,w)
+      auto shortcut_cost = v_to_u_cost + w_successor.cost;
+
+      // Witness search: check if direct path v->w exists with <= shortcut_cost
+      if (!witness_path_exists(v, w_node, shortcut_cost, u)) {
+        add_shortcut(v, w_node, shortcut_cost, u, w_successor);
+      }
+    }
+  }
+}
+
+inline void contract_car_nodes() {
+  // Get all car::node states sorted by level
+  std::vector<std::pair<std::uint32_t, car::node>> level_sorted;
+  for (auto const& [car_node, level] : car_node_levels) {
+    level_sorted.emplace_back(level, car_node);
+  }
+
+  std::sort(level_sorted.begin(), level_sorted.end(),
+            [](auto const& a, auto const& b) {
+              return a.first < b.first;  // Sort by level ascending
+            });
+
+  for (auto const& [level, u] : level_sorted) {
+    contract_car_node(u);
+  }
+}
+
+inline void preprocess(ways const& w,
+                      ways::routing const& r,
+                      bitvec<node_idx_t> const* blocked = nullptr,
+                      sharing_data const* sharing = nullptr,
+                      elevation_storage const* elevations = nullptr) {
+  // Step 1: Build basic adjacency maps + legal_incoming
+  preprocess_car_adjacency(w, r, blocked, sharing, elevations);
+
+  // Step 2: Assign random levels to all car::node states
+  assign_random_car_node_levels();
+
+  // Step 3: Contract car::node states in level order
+  contract_car_nodes();
 }
 
 }  // namespace osr

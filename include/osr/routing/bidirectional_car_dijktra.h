@@ -16,6 +16,54 @@ namespace osr {
 
 struct sharing_data;
 
+struct car_successor {
+  car::node target;
+  std::uint32_t cost;
+  distance_t distance;
+  way_idx_t way;
+  std::uint16_t from;
+  std::uint16_t to;
+  elevation_storage::elevation elevation;
+  bool track;
+};
+
+struct car_node_hash {
+  using is_avalanching = void;
+  auto operator()(car::node const& n) const noexcept -> std::uint64_t {
+    using namespace ankerl::unordered_dense::detail;
+    auto const combined = (static_cast<std::uint64_t>(to_idx(n.n_)) << 32) |
+                          (static_cast<std::uint64_t>(n.way_) << 8) |
+                          static_cast<std::uint64_t>(n.dir_);
+    return wyhash::hash(combined);
+  }
+};
+
+using car_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<car_successor>, car_node_hash>;
+inline car_adjacency_map legal_successor;
+inline car_adjacency_map legal_predecessor;
+
+template <direction SearchDir, bool WithBlocked, typename Fn>
+void precomputed_adjacent(car::node const& state,
+                          bitvec<node_idx_t> const* blocked,
+                          Fn&& fn) {
+  auto const& adjacency_map = (SearchDir == direction::kForward)
+                               ? legal_successor : legal_predecessor;
+
+  auto it = adjacency_map.find(state);
+  if (it == adjacency_map.end()) return;
+
+  for (auto const& successor : it->second) {
+    if constexpr (WithBlocked) {
+      if (blocked && blocked->test(successor.target.n_)) {
+        continue;
+      }
+    }
+    fn(successor.target, successor.cost, successor.distance,
+       successor.way, successor.from, successor.to,
+       successor.elevation, successor.track);
+  }
+}
+
 struct bidirectional_car_dijkstra {
   using profile_t = car;
   using key = car::key;
@@ -216,8 +264,8 @@ struct bidirectional_car_dijkstra {
       std::cout << "\n";
     }
 
-    car::adjacent<SearchDir, WithBlocked>(
-        r, curr, blocked, sharing, elevations,
+    precomputed_adjacent<SearchDir, WithBlocked>(
+        curr, blocked,
         [&](node const neighbor, std::uint32_t const cost, distance_t,
             way_idx_t const way, std::uint16_t, std::uint16_t,
             elevation_storage::elevation const, bool const track) {
@@ -334,5 +382,37 @@ struct bidirectional_car_dijkstra {
   bool max_reached_1_;
   bool max_reached_2_;
 };
+
+inline void preprocess_car_adjacency(ways const& w,
+                              ways::routing const& r,
+                              bitvec<node_idx_t> const* blocked = nullptr,
+                              sharing_data const* sharing = nullptr,
+                              elevation_storage const* elevations = nullptr) {
+  legal_successor.clear();
+  legal_predecessor.clear();
+
+  for (node_idx_t n{0}; n < w.n_nodes(); ++n) {
+    car::resolve_all(r, n, level_t{}, [&](car::node state) {
+
+      car::adjacent<direction::kForward, false>(
+        r, state, blocked, sharing, elevations,
+        [&](car::node target, std::uint32_t cost, distance_t dist,
+            way_idx_t way, std::uint16_t from, std::uint16_t to,
+            elevation_storage::elevation elev, bool track) {
+          legal_successor[state].emplace_back(
+            car_successor{target, cost, dist, way, from, to, elev, track});
+        });
+
+      car::adjacent<direction::kBackward, false>(
+        r, state, blocked, sharing, elevations,
+        [&](car::node target, std::uint32_t cost, distance_t dist,
+            way_idx_t way, std::uint16_t from, std::uint16_t to,
+            elevation_storage::elevation elev, bool track) {
+          legal_predecessor[state].emplace_back(
+            car_successor{target, cost, dist, way, from, to, elev, track});
+        });
+    });
+  }
+}
 
 }  // namespace osr

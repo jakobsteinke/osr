@@ -192,6 +192,7 @@ TEST(dijkstra_astarbidir, monaco) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }
 
@@ -210,6 +211,7 @@ TEST(dijkstra_astarbidir, tokelau) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }
 
@@ -228,6 +230,7 @@ TEST(dijkstra_astarbidir, london) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }
 
@@ -246,6 +249,7 @@ TEST(dijkstra_astarbidir, hamburg) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }
 
@@ -264,6 +268,7 @@ TEST(dijkstra_astarbidir, switzerland) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }
 
@@ -282,5 +287,6 @@ TEST(dijkstra_astarbidir, DISABLED_germany) {
   auto const l = osr::lookup{w, data_dir, cista::mmap::protection::READ};
 
   preprocess_car_adjacency(w, *w.r_);
+  osr::ch::preprocess_ch();
   run(w, l, num_samples, max_cost);
 }

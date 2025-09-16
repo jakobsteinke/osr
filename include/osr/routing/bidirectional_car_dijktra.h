@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <queue>
 #include <unordered_map>
+#include <iostream>
 
 #include "utl/verify.h"
 #include "utl/zip.h"
@@ -751,7 +752,13 @@ inline void contract_car_nodes() {
               return a.first < b.first;  // Sort by level ascending
             });
 
+  size_t current_idx = 0;
+  size_t total_nodes = level_sorted.size();
+
   for (auto const& [level, u] : level_sorted) {
+    current_idx++;
+    std::cout << "Contracting level " << current_idx << "/" << total_nodes
+              << " (node level: " << level << ")" << std::endl;
     contract_car_node(u);
   }
 }
@@ -767,8 +774,87 @@ inline void preprocess(ways const& w,
   // Step 2: Assign random levels to all car::node states
   assign_random_car_node_levels();
 
+  // Count edges before contraction
+  size_t edges_before = 0;
+  for (auto const& [node, successors] : legal_successor) {
+    edges_before += successors.size();
+  }
+
   // Step 3: Contract car::node states in level order
   contract_car_nodes();
+
+  // Count edges after contraction and shortcuts
+  size_t edges_after = 0;
+  size_t shortcuts_count = 0;
+  for (auto const& [node, successors] : legal_successor) {
+    edges_after += successors.size();
+    for (auto const& edge : successors) {
+      if (edge.is_shortcut) {
+        shortcuts_count++;
+      }
+    }
+  }
+
+  // Print statistics
+  std::cout << "=== CH Preprocessing Statistics ===" << std::endl;
+  std::cout << "car_node_levels size: " << car_node_levels.size() << std::endl;
+  std::cout << "legal_successor size: " << legal_successor.size() << std::endl;
+  std::cout << "legal_predecessor size: " << legal_predecessor.size() << std::endl;
+  std::cout << "legal_incoming size: " << legal_incoming.size() << std::endl;
+  std::cout << "Edges before contraction: " << edges_before << std::endl;
+  std::cout << "Edges after contraction: " << edges_after << std::endl;
+  std::cout << "Shortcuts added: " << shortcuts_count << std::endl;
+  std::cout << "==================================" << std::endl;
+
+  // Print detailed adjacency info for nodes with levels 330-340
+  std::cout << "\n=== Adjacency Details for Levels 330-340 ===" << std::endl;
+  for (auto const& [node, level] : car_node_levels) {
+    if (level >= 330 && level <= 340) {
+      std::cout << "\nNode (n:" << to_idx(node.n_) << " way:" << node.way_
+                << " dir:" << static_cast<int>(node.dir_) << ") Level:" << level << std::endl;
+
+      // Print successors
+      std::cout << "  Successors:" << std::endl;
+      auto succ_it = legal_successor.find(node);
+      if (succ_it != legal_successor.end()) {
+        for (auto const& edge : succ_it->second) {
+          std::cout << "    -> (n:" << to_idx(edge.target.n_) << " way:" << edge.target.way_
+                    << " dir:" << static_cast<int>(edge.target.dir_) << ") cost:" << edge.cost
+                    << (edge.is_shortcut ? " [SHORTCUT via n:" + std::to_string(to_idx(edge.via_state.n_)) + "]" : " [ORIGINAL]")
+                    << std::endl;
+        }
+      } else {
+        std::cout << "    (none)" << std::endl;
+      }
+
+      // Print predecessors
+      std::cout << "  Predecessors:" << std::endl;
+      auto pred_it = legal_predecessor.find(node);
+      if (pred_it != legal_predecessor.end()) {
+        for (auto const& edge : pred_it->second) {
+          std::cout << "    <- (n:" << to_idx(edge.target.n_) << " way:" << edge.target.way_
+                    << " dir:" << static_cast<int>(edge.target.dir_) << ") cost:" << edge.cost
+                    << (edge.is_shortcut ? " [SHORTCUT via n:" + std::to_string(to_idx(edge.via_state.n_)) + "]" : " [ORIGINAL]")
+                    << std::endl;
+        }
+      } else {
+        std::cout << "    (none)" << std::endl;
+      }
+
+      // Print incoming connections
+      std::cout << "  Incoming nodes:" << std::endl;
+      auto inc_it = legal_incoming.find(node);
+      if (inc_it != legal_incoming.end()) {
+        for (auto const& incoming_node : inc_it->second) {
+          std::cout << "    <- (n:" << to_idx(incoming_node.n_) << " way:" << incoming_node.way_
+                    << " dir:" << static_cast<int>(incoming_node.dir_) << ")" << std::endl;
+        }
+      } else {
+        std::cout << "    (none)" << std::endl;
+      }
+    }
+  }
+  std::cout << "=============================================" << std::endl;
 }
 
 // Function to fully unpack shortcuts into a flat sequence of base edges

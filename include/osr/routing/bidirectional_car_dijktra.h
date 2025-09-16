@@ -3,6 +3,7 @@
 #include <limits>
 #include <queue>
 #include <algorithm>
+#include <random>
 
 #include "utl/verify.h"
 
@@ -43,6 +44,20 @@ struct car_node_hash {
 using car_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<car_successor>, car_node_hash>;
 inline car_adjacency_map legal_successor;
 inline car_adjacency_map legal_predecessor;
+
+// Forward declare CH types for use in bidirectional_car_dijkstra
+namespace ch {
+  using ch_level_t = std::uint32_t;
+  using ch_order_t = std::uint32_t;
+  struct ch_node_data {
+    ch_level_t level = 0;
+    ch_order_t order = 0;
+    bool contracted = false;
+  };
+  using ch_node_map = ankerl::unordered_dense::map<car::node, ch_node_data, car_node_hash>;
+  inline ch_node_map ch_node_info;
+  inline bool ch_preprocessed = false;
+}
 
 struct bidirectional_car_dijkstra {
   using profile_t = car;
@@ -267,6 +282,16 @@ struct bidirectional_car_dijkstra {
         auto const way = successor.way;
         auto const track = successor.track;
 
+        // CH level filtering: only explore higher level nodes when CH is preprocessed
+        if (osr::ch::ch_preprocessed) {
+          //std::cout << "MANGO ";
+          auto curr_level = osr::ch::ch_node_info[curr].level;
+          auto neighbor_level = osr::ch::ch_node_info[neighbor].level;
+          if (neighbor_level <= curr_level) {
+            continue;
+          }
+        }
+
         if constexpr (kDebug) {
           std::cout << "  NEIGHBOR ";
           neighbor.print(std::cout, w);
@@ -415,15 +440,6 @@ inline void preprocess_car_adjacency(ways const& w,
 // Contraction Hierarchies Extension (Optional Layer)
 namespace ch {
 
-using ch_level_t = std::uint32_t;
-using ch_order_t = std::uint32_t;
-
-struct ch_node_data {
-  ch_level_t level = 0;
-  ch_order_t order = 0;
-  bool contracted = false;
-};
-
 struct ch_edge {
   car::node target;
   cost_t cost;
@@ -443,13 +459,10 @@ struct ch_edge {
 };
 
 using ch_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<ch_edge>, car_node_hash>;
-using ch_node_map = ankerl::unordered_dense::map<car::node, ch_node_data, car_node_hash>;
 
 // Global CH data structures
 inline ch_adjacency_map ch_upward_graph;
 inline ch_adjacency_map ch_downward_graph;
-inline ch_node_map ch_node_info;
-inline bool ch_preprocessed = false;
 inline size_t ch_shortcuts_created = 0;
 
 // CH Preprocessing Functions
@@ -464,21 +477,21 @@ inline ch_level_t calculate_node_importance(car::node const& node) {
 }
 
 inline void assign_node_levels() {
-  std::vector<std::pair<ch_level_t, car::node>> importance_list;
+  std::vector<car::node> node_list;
 
-  // Calculate importance for all nodes
+  // Collect all nodes
   for (auto const& [node, successors] : legal_successor) {
-    ch_level_t importance = calculate_node_importance(node);
-    importance_list.emplace_back(importance, node);
+    node_list.push_back(node);
   }
 
-  // Sort by importance (ascending) - only compare the first element (importance)
-  std::sort(importance_list.begin(), importance_list.end(),
-            [](auto const& a, auto const& b) { return a.first < b.first; });
+  // Random shuffle for random ordering
+  std::random_device rd;
+  std::mt19937 gen(rd());
+  std::shuffle(node_list.begin(), node_list.end(), gen);
 
-  // Assign levels based on order
-  for (size_t i = 0; i < importance_list.size(); ++i) {
-    auto const& node = importance_list[i].second;
+  // Assign levels based on random order
+  for (size_t i = 0; i < node_list.size(); ++i) {
+    auto const& node = node_list[i];
     ch_node_info[node].level = static_cast<ch_level_t>(i + 1);
     ch_node_info[node].order = static_cast<ch_order_t>(i + 1);
   }

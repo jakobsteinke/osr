@@ -102,7 +102,7 @@ int main(int argc, char const* argv[]) {
     auto t0 = std::chrono::steady_clock::now();
 
     // If you want elevation-aware edge data, pass elevations.get(); otherwise nullptr is fine.
-    preprocess(
+    preprocess_car_adjacency(
         w, *w.r_,
         /*blocked=*/nullptr,
         /*sharing=*/nullptr,

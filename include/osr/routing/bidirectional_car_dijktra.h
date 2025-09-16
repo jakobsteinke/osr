@@ -810,15 +810,36 @@ inline void preprocess(ways const& w,
   std::cout << "\n=== Adjacency Details for Levels 330-340 ===" << std::endl;
   for (auto const& [node, level] : car_node_levels) {
     if (level >= 330 && level <= 340) {
-      std::cout << "\nNode (n:" << to_idx(node.n_) << " way:" << node.way_
+      // Count entries in each map
+      size_t succ_count = 0;
+      size_t pred_count = 0;
+      size_t inc_count = 0;
+
+      auto succ_it = legal_successor.find(node);
+      if (succ_it != legal_successor.end()) {
+        succ_count = succ_it->second.size();
+      }
+
+      auto pred_it = legal_predecessor.find(node);
+      if (pred_it != legal_predecessor.end()) {
+        pred_count = pred_it->second.size();
+      }
+
+      auto inc_it = legal_incoming.find(node);
+      if (inc_it != legal_incoming.end()) {
+        inc_count = inc_it->second.size();
+      }
+
+      std::cout << "\nNode (n:" << to_idx(node.n_) << " way:" <<  static_cast<int>(node.way_)
                 << " dir:" << static_cast<int>(node.dir_) << ") Level:" << level << std::endl;
+      std::cout << "  Counts: Successors=" << succ_count << " Predecessors=" << pred_count
+                << " Incoming=" << inc_count << std::endl;
 
       // Print successors
       std::cout << "  Successors:" << std::endl;
-      auto succ_it = legal_successor.find(node);
       if (succ_it != legal_successor.end()) {
         for (auto const& edge : succ_it->second) {
-          std::cout << "    -> (n:" << to_idx(edge.target.n_) << " way:" << edge.target.way_
+          std::cout << "    -> (n:" << to_idx(edge.target.n_) << " way:" <<  static_cast<int>(edge.target.way_)
                     << " dir:" << static_cast<int>(edge.target.dir_) << ") cost:" << edge.cost
                     << (edge.is_shortcut ? " [SHORTCUT via n:" + std::to_string(to_idx(edge.via_state.n_)) + "]" : " [ORIGINAL]")
                     << std::endl;
@@ -829,10 +850,9 @@ inline void preprocess(ways const& w,
 
       // Print predecessors
       std::cout << "  Predecessors:" << std::endl;
-      auto pred_it = legal_predecessor.find(node);
       if (pred_it != legal_predecessor.end()) {
         for (auto const& edge : pred_it->second) {
-          std::cout << "    <- (n:" << to_idx(edge.target.n_) << " way:" << edge.target.way_
+          std::cout << "    <- (n:" << to_idx(edge.target.n_) << " way:" <<  static_cast<int>(edge.target.way_)
                     << " dir:" << static_cast<int>(edge.target.dir_) << ") cost:" << edge.cost
                     << (edge.is_shortcut ? " [SHORTCUT via n:" + std::to_string(to_idx(edge.via_state.n_)) + "]" : " [ORIGINAL]")
                     << std::endl;
@@ -841,13 +861,31 @@ inline void preprocess(ways const& w,
         std::cout << "    (none)" << std::endl;
       }
 
-      // Print incoming connections
+      // Print incoming connections with shortcut information
       std::cout << "  Incoming nodes:" << std::endl;
-      auto inc_it = legal_incoming.find(node);
       if (inc_it != legal_incoming.end()) {
         for (auto const& incoming_node : inc_it->second) {
-          std::cout << "    <- (n:" << to_idx(incoming_node.n_) << " way:" << incoming_node.way_
-                    << " dir:" << static_cast<int>(incoming_node.dir_) << ")" << std::endl;
+          // Check if there's a shortcut from incoming_node to current node
+          bool found_shortcut = false;
+          std::string shortcut_info = "";
+
+          auto incoming_succ_it = legal_successor.find(incoming_node);
+          if (incoming_succ_it != legal_successor.end()) {
+            for (auto const& edge : incoming_succ_it->second) {
+              if (edge.target.n_ == node.n_ && edge.target.way_ == node.way_ && edge.target.dir_ == node.dir_) {
+                if (edge.is_shortcut) {
+                  shortcut_info = " [SHORTCUT via n:" + std::to_string(to_idx(edge.via_state.n_)) + "]";
+                } else {
+                  shortcut_info = " [ORIGINAL]";
+                }
+                found_shortcut = true;
+                break;
+              }
+            }
+          }
+
+          std::cout << "    <- (n:" << to_idx(incoming_node.n_) << " way:" <<  static_cast<int>(incoming_node.way_)
+                    << " dir:" << static_cast<int>(incoming_node.dir_) << ")" << shortcut_info << std::endl;
         }
       } else {
         std::cout << "    (none)" << std::endl;

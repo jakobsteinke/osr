@@ -42,13 +42,37 @@ using car_adjacency_map = ankerl::unordered_dense::map<car::node, std::vector<ca
 inline car_adjacency_map legal_successor;
 inline car_adjacency_map legal_predecessor;
 
+struct car_node_entry {
+  cost_t cost_ = kInfeasible;
+  car::node pred_ = car::node::invalid();
+
+  constexpr cost_t cost(car::node const&) const noexcept {
+    return cost_;
+  }
+
+  constexpr std::optional<car::node> pred(car::node const&) const noexcept {
+    return pred_.n_ == node_idx_t::invalid() ? std::nullopt : std::optional{pred_};
+  }
+
+  constexpr bool update(car::label const&, car::node const&, cost_t const c, car::node const pred) noexcept {
+    if (c < cost_) {
+      cost_ = c;
+      pred_ = pred;
+      return true;
+    }
+    return false;
+  }
+
+  void write(car::node, path&) const {}
+};
+
 struct bidirectional_car_dijkstra {
   using profile_t = car;
-  using key = car::key;
+  using key = car::node;
   using label = car::label;
   using node = car::node;
-  using entry = car::entry;
-  using hash = car::hash;
+  using entry = car_node_entry;
+  using hash = car_node_hash;
   using cost_map = ankerl::unordered_dense::map<key, entry, hash>;
 
   constexpr static auto const kDebug = false;
@@ -85,8 +109,8 @@ struct bidirectional_car_dijkstra {
            cost_map& cost_map,
            dial<label, get_bucket>& d,
            sharing_data const*) {
-    if (cost_map[l.get_node().get_key()].update(l, l.get_node(), l.cost(),
-                                                node::invalid())) {
+    if (cost_map[l.get_node()].update(l, l.get_node(), l.cost(),
+                                      node::invalid())) {
       d.push(l);
     }
   }
@@ -110,10 +134,10 @@ struct bidirectional_car_dijkstra {
   template <direction SearchDir>
   cost_t get_cost(node const n) const {
     if (SearchDir == direction::kForward) {
-      auto const it = cost1_.find(n.get_key());
+      auto const it = cost1_.find(n);
       return it != end(cost1_) ? it->second.cost(n) : kInfeasible;
     } else {
-      auto const it = cost2_.find(n.get_key());
+      auto const it = cost2_.find(n);
       return it != end(cost2_) ? it->second.cost(n) : kInfeasible;
     }
   }
@@ -157,70 +181,46 @@ struct bidirectional_car_dijkstra {
 
     auto const opposite_cost_map =
         opposite(SearchDir) == direction::kForward ? &cost1_ : &cost2_;
-    auto const opposite_candidate = opposite_cost_map->find(curr.get_key());
     auto const curr_cost = get_cost<SearchDir>(curr);
-    
-    if (opposite_candidate != end(*opposite_cost_map)) {
-      auto const other_cost = opposite_candidate->second.cost(curr);
-      if (other_cost != kInfeasible) {
-        evaluate_meetpoint(curr_cost, other_cost, curr, curr);
-      } else {
-        auto const pred_it = costs.find(curr.get_key());
-        if (pred_it == end(costs)) {
-          return;
-        }
-        auto const pred = pred_it->second.pred(curr);
-        if (!pred.has_value()) {
-          return;
-        }
-        auto const& adjacency_map = (opposite(SearchDir) == direction::kForward)
-                                     ? legal_successor : legal_predecessor;
-        auto it = adjacency_map.find(curr);
-        if (it != adjacency_map.end()) {
-          for (auto const& successor : it->second) {
-            if constexpr (WithBlocked) {
-              if (blocked && blocked->test(successor.target.n_)) {
-                continue;
-              }
-            }
-            auto const neighbor = successor.target;
 
-            if (neighbor.get_key() != pred->get_key()) {
-              continue;
-            }
-            auto const opposite_it =
-                opposite_cost_map->find(neighbor.get_key());
-            if (opposite_it == end(*opposite_cost_map)) {
-              continue;
-            }
-            auto const opposite_curr = opposite_it->second.pred(neighbor);
-            if (!opposite_curr.has_value() ||
-                opposite_curr->get_key() != curr.get_key()) {
-              continue;
-            }
-            auto const opposite_curr_cost =
-                opposite_candidate->second.cost(*opposite_curr);
-            auto const pred_cost = get_cost<SearchDir>(*pred);
-            auto const opposite_pred_cost =
-                opposite_it->second.cost(neighbor);
-            auto const evaluate_meetpoint_with_potential_u_turn_cost =
-                [&](cost_t const cost_1, cost_t const cost_2,
-                    node const meet_1, node const meet_2) {
-                  evaluate_meetpoint(
-                      cost_1, cost_2,
-                      SearchDir == direction::kForward ? meet_1 : meet_2,
-                      SearchDir == direction::kForward ? meet_2 : meet_1);
-                };
-            if (pred_cost + opposite_pred_cost >
-                curr_cost + opposite_curr_cost) {
-              evaluate_meetpoint_with_potential_u_turn_cost(
-                  pred_cost, opposite_pred_cost, *pred, neighbor);
-            } else {
-              evaluate_meetpoint_with_potential_u_turn_cost(
-                  curr_cost, opposite_curr_cost, curr, *opposite_curr);
-            }
-          }
+    // Find all opposite car::nodes at the same physical node_idx_t
+    for (auto const& [opposite_node, opposite_entry] : *opposite_cost_map) {
+      if (opposite_node.n_ != curr.n_) continue;  // Different physical node
+
+      auto const opposite_cost = opposite_entry.cost(opposite_node);
+      if (opposite_cost == kInfeasible) continue;
+
+      // For identical car::nodes, no turn restriction check needed
+      if (curr.n_ == opposite_node.n_ && curr.way_ == opposite_node.way_ && curr.dir_ == opposite_node.dir_) {
+        evaluate_meetpoint(curr_cost, opposite_cost, curr, opposite_node);
+        continue;
+      }
+
+      // For different way/direction combinations, check turn restrictions
+      // When forward search settles curr and backward search settled opposite_node,
+      // we need to check if we can legally transition from curr's state to opposite_node's state
+      auto const can_connect = [&]() {
+        if (SearchDir == direction::kForward) {
+          // Forward search settled curr, backward search settled opposite_node
+          // Check if we can go from curr.way_ to opposite_node.way_
+          return !r.is_restricted<direction::kForward>(curr.n_, curr.way_, opposite_node.way_);
+        } else {
+          // Backward search settled curr, forward search settled opposite_node
+          // Check if we can go from opposite_node.way_ to curr.way_
+          return !r.is_restricted<direction::kForward>(curr.n_, opposite_node.way_, curr.way_);
         }
+      }();
+
+      if (!can_connect) continue;
+
+      // Calculate meetpoint cost including any U-turn penalty
+      auto const is_u_turn = (curr.way_ == opposite_node.way_) && (curr.dir_ != opposite_node.dir_);
+      auto const u_turn_cost = is_u_turn ? car::kUturnPenalty : 0U;
+
+      if (SearchDir == direction::kForward) {
+        evaluate_meetpoint(curr_cost, opposite_cost + u_turn_cost, curr, opposite_node);
+      } else {
+        evaluate_meetpoint(curr_cost, opposite_cost + u_turn_cost, opposite_node, curr);
       }
     }
   }
@@ -279,7 +279,7 @@ struct bidirectional_car_dijkstra {
           continue;
         }
         if (total < max &&
-            costs[neighbor.get_key()].update(
+            costs[neighbor].update(
                 l, neighbor, static_cast<cost_t>(total), curr)) {
 
           auto next = label{neighbor, static_cast<cost_t>(total)};

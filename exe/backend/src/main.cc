@@ -101,7 +101,6 @@ int main(int argc, char const* argv[]) {
     std::cout << "[BCD] preprocessing start...\n";
     auto t0 = std::chrono::steady_clock::now();
 
-    // If you want elevation-aware edge data, pass elevations.get(); otherwise nullptr is fine.
     preprocess_car_adjacency(
         w, *w.r_,
         /*blocked=*/nullptr,

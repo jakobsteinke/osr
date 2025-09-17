@@ -23,6 +23,11 @@ struct car {
 
   struct node {
     friend bool operator==(node, node) = default;
+    friend bool operator<(node const& a, node const& b) noexcept {
+      if (a.n_ != b.n_) return a.n_ < b.n_;
+      if (a.way_ != b.way_) return a.way_ < b.way_;
+      return a.dir_ < b.dir_;
+    }
 
     static constexpr node invalid() noexcept {
       return node{

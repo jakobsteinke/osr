@@ -337,6 +337,65 @@ path reconstruct_bi(ways const& w,
   return p;
 }
 
+std::vector<std::pair<car::node, car::node>> expand_shortcut(car::node const from,
+                                                             car::node const to,
+                                                             node_idx_t const via_node) {
+  std::vector<std::pair<car::node, car::node>> segments;
+
+  // Recursively expand shortcuts
+  auto const expand_recursive = [&](auto& self, car::node const from_node, car::node const to_node, node_idx_t const via) -> void {
+    if (via == node_idx_t::invalid()) {
+      // This is an original edge, add directly
+      segments.emplace_back(from_node, to_node);
+      return;
+    }
+
+    // Find the intermediate car::node states at the via node
+    // We need to reconstruct the path through the via node
+    car_state from_state{from_node.n_, from_node.way_, from_node.dir_};
+    auto from_it = legal_successors.find(from_state);
+    if (from_it != legal_successors.end()) {
+      for (auto const& edge : from_it->second) {
+        if (edge.target.n_ == via && edge.is_shortcut) {
+          // Found path from from_node to via node - recursively expand
+          self(self, from_node, edge.target, edge.via_state.n);
+
+          // Now find path from via node to to_node
+          car_state via_state{edge.target.n_, edge.target.way_, edge.target.dir_};
+          auto via_it = legal_successors.find(via_state);
+          if (via_it != legal_successors.end()) {
+            for (auto const& via_edge : via_it->second) {
+              if (via_edge.target == to_node) {
+                self(self, edge.target, to_node, via_edge.is_shortcut ? via_edge.via_state.n : node_idx_t::invalid());
+                return;
+              }
+            }
+          }
+          return;
+        } else if (edge.target.n_ == via && !edge.is_shortcut) {
+          // Direct edge to via, then need to find path from via to target
+          segments.emplace_back(from_node, edge.target);
+
+          car_state via_state{edge.target.n_, edge.target.way_, edge.target.dir_};
+          auto via_it = legal_successors.find(via_state);
+          if (via_it != legal_successors.end()) {
+            for (auto const& via_edge : via_it->second) {
+              if (via_edge.target == to_node) {
+                self(self, edge.target, to_node, via_edge.is_shortcut ? via_edge.via_state.n : node_idx_t::invalid());
+                return;
+              }
+            }
+          }
+          return;
+        }
+      }
+    }
+  };
+
+  expand_recursive(expand_recursive, from, to, via_node);
+  return segments;
+}
+
 path reconstruct_bidirectional_car_dijkstra(ways const& w,
                                            lookup const& l,
                                            bitvec<node_idx_t> const* blocked,
@@ -355,14 +414,45 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   auto forward_dist = 0.0;
 
   while (true) {
-    auto const& e = bcd.cost1_.at(forward_n);
+    car_state forward_state = bidirectional_car_dijkstra::make_car_state(forward_n);
+    auto const& e = bcd.cost1_.at(forward_state);
     auto const pred = e.pred(forward_n);
     if (pred.has_value()) {
       auto const expected_cost = static_cast<cost_t>(
           e.cost(forward_n) - bcd.template get_cost<direction::kForward>(*pred));
-      forward_dist +=
-          add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
-                        forward_n, expected_cost, forward_segments, dir);
+
+      // Check if this is a shortcut edge that needs expansion
+      bool is_shortcut_edge = false;
+      node_idx_t shortcut_via = node_idx_t::invalid();
+
+      car_state pred_state{pred->n_, pred->way_, pred->dir_};
+      auto pred_it = legal_successors.find(pred_state);
+      if (pred_it != legal_successors.end()) {
+        for (auto const& edge : pred_it->second) {
+          if (edge.target == forward_n && edge.cost == expected_cost && edge.is_shortcut) {
+            is_shortcut_edge = true;
+            shortcut_via = edge.via_state.n;
+            break;
+          }
+        }
+      }
+
+      if (is_shortcut_edge) {
+        // Expand the shortcut into constituent segments
+        auto const expanded_segments = expand_shortcut(*pred, forward_n, shortcut_via);
+        for (auto const& [seg_from, seg_to] : expanded_segments) {
+          // Find the actual cost for this segment
+          auto seg_cost = static_cast<cost_t>(expected_cost / expanded_segments.size()); // Simple approximation
+          forward_dist +=
+              add_path<car>(w, *w.r_, blocked, sharing, elevations, seg_from,
+                            seg_to, seg_cost, forward_segments, dir);
+        }
+      } else {
+        // Regular edge
+        forward_dist +=
+            add_path<car>(w, *w.r_, blocked, sharing, elevations, *pred,
+                          forward_n, expected_cost, forward_segments, dir);
+      }
     } else {
       break;
     }
@@ -392,16 +482,47 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
   auto backward_dist = 0.0;
 
   while (true) {
-    auto const& e = bcd.cost2_.at(backward_n);
+    car_state backward_state = bidirectional_car_dijkstra::make_car_state(backward_n);
+    auto const& e = bcd.cost2_.at(backward_state);
     auto const pred = e.pred(backward_n);
     if (pred.has_value()) {
 
       auto const expected_cost =
           static_cast<cost_t>(e.cost(backward_n) -
                               bcd.template get_cost<direction::kBackward>(*pred));
-      backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
-                                     *pred, backward_n, expected_cost,
-                                     backward_segments, opposite(dir));
+
+      // Check if this is a shortcut edge that needs expansion
+      bool is_shortcut_edge = false;
+      node_idx_t shortcut_via = node_idx_t::invalid();
+
+      car_state backward_state{backward_n.n_, backward_n.way_, backward_n.dir_};
+      auto pred_it = legal_predecessors.find(backward_state);
+      if (pred_it != legal_predecessors.end()) {
+        for (auto const& edge : pred_it->second) {
+          if (edge.target == *pred && edge.cost == expected_cost && edge.is_shortcut) {
+            is_shortcut_edge = true;
+            shortcut_via = edge.via_state.n;
+            break;
+          }
+        }
+      }
+
+      if (is_shortcut_edge) {
+        // Expand the shortcut into constituent segments
+        auto const expanded_segments = expand_shortcut(*pred, backward_n, shortcut_via);
+        for (auto const& [seg_from, seg_to] : expanded_segments) {
+          // Find the actual cost for this segment
+          auto seg_cost = static_cast<cost_t>(expected_cost / expanded_segments.size()); // Simple approximation
+          backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
+                                         seg_from, seg_to, seg_cost,
+                                         backward_segments, opposite(dir));
+        }
+      } else {
+        // Regular edge
+        backward_dist += add_path<car>(w, *w.r_, blocked, sharing, elevations,
+                                       *pred, backward_n, expected_cost,
+                                       backward_segments, opposite(dir));
+      }
     } else {
       break;
     }
@@ -445,7 +566,8 @@ path reconstruct_bidirectional_car_dijkstra(ways const& w,
                 .elevation_ = path_elevation,
                 .segments_ = forward_segments};
 
-  bcd.cost2_.at(backward_n).write(backward_n, p);
+  car_state final_backward_state = bidirectional_car_dijkstra::make_car_state(backward_n);
+  bcd.cost2_.at(final_backward_state).write(backward_n, p);
   return p;
 }
 

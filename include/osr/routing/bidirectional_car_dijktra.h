@@ -22,7 +22,6 @@ namespace osr {
 struct sharing_data;
 
 struct bidirectional_car_dijkstra {
-  // New structures for precomputed adjacency - must be defined first
   struct car_state {
     node_idx_t n;
     way_pos_t way;
@@ -70,7 +69,6 @@ struct bidirectional_car_dijkstra {
     std::uint16_t from;
     std::uint16_t to;
     
-    // Shortcut fields
     bool is_shortcut = false;
     car_state via_state = {node_idx_t::invalid(), way_pos_t{0}, direction::kForward};
     
@@ -78,7 +76,6 @@ struct bidirectional_car_dijkstra {
     edge_transition* first_edge = nullptr;   // Complete A->B edge info
     edge_transition* second_edge = nullptr;  // Complete B->C edge info
     
-    // Default constructor
     edge_transition() = default;
     
     // Constructor for normal edges
@@ -101,7 +98,6 @@ struct bidirectional_car_dijkstra {
       }
     }
     
-    // Assignment operator
     edge_transition& operator=(const edge_transition& other) {
       if (this != &other) {
         source = other.source;
@@ -306,82 +302,21 @@ struct bidirectional_car_dijkstra {
     return nullptr;
   }
 
- /* static void assign_random_levels() {
-    car_state_levels_.clear();
-    
-    // Collect all unique car_states from both successor and predecessor maps
-    std::vector<car_state> all_states;
-    for (auto const& [state, _] : legal_successors_) {
-      all_states.push_back(state);
-    }
-    for (auto const& [state, _] : legal_predecessors_) {
-      if (car_state_levels_.find(state) == car_state_levels_.end()) {
-        all_states.push_back(state);
-      }
-    }
-    
-    // Remove duplicates
-    std::sort(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
-      if (a.n != b.n) return a.n < b.n;
-      if (a.way != b.way) return a.way < b.way;
-      return a.dir < b.dir;
-    });
-    all_states.erase(std::unique(all_states.begin(), all_states.end(), [](car_state const& a, car_state const& b) {
-      return a.n == b.n && a.way == b.way && a.dir == b.dir;
-    }), all_states.end());
-    
-    // Assign random levels
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::vector<ch_level_t> levels;
-    for (ch_level_t i = 1; i <= static_cast<ch_level_t>(all_states.size()); ++i) {
-      levels.push_back(i);
-    }
-    std::shuffle(levels.begin(), levels.end(), gen);
-    
-    for (size_t i = 0; i < all_states.size(); ++i) {
-      car_state_levels_[all_states[i]] = levels[i];
-    }
-    
-    // Print level of each node after assignment
-    std::cout << "Level assignment for " << all_states.size() << " car_states:\n";
-    /*for (size_t i = 0; i < all_states.size(); ++i) {
-      auto const& state = all_states[i];
-      std::cout << "Node " << to_idx(state.n) << " (way=" << static_cast<int>(state.way) 
-                << ", dir=" << (state.dir == direction::kForward ? "FWD" : "BWD") 
-                << ") -> Level " << levels[i] << "\n";
-    }
-    
-    if constexpr (kDebugMaps) {
-      std::cout << "Assigned random levels to " << all_states.size() << " car_states\n";
-    }
-  } */
-
   static void assign_random_levels() {
   car_state_levels_.clear();
 
   auto add_state = [&](car_state const& s) {
-    // no-op if present
     if (car_state_levels_.find(s) == car_state_levels_.end()) {
-      car_state_levels_.emplace(s, 0); // temp
+      car_state_levels_.emplace(s, 0); 
     }
   };
 
-  // 1) collect from successor map
   for (auto const& [src, edges] : legal_successors_) {
     add_state(src);
     for (auto const& e : edges) {
       add_state({e.target.n_, e.target.way_, e.target.dir_});
     }
   }
-  // 2) collect from predecessor map
-  /*for (auto const& [src, edges] : legal_predecessors_) {
-    add_state(src);
-    for (auto const& e : edges) {
-      add_state({e.target.n_, e.target.way_, e.target.dir_});
-    }
-  }*/
-  // 3) collect from incoming map (covers targets explicitly)
   for (auto const& [src, edges] : legal_incoming_) {
     add_state(src);
     for (auto const& e : edges) {
@@ -405,7 +340,7 @@ struct bidirectional_car_dijkstra {
   }
 
   // Optional: validation
-  // verify_levels_complete();  // (see below)
+  // verify_levels_complete();  
 }
 
 
@@ -421,7 +356,6 @@ struct bidirectional_car_dijkstra {
                        std::vector<std::pair<cost_t, car_state>>,
                        std::greater<std::pair<cost_t, car_state>>> pq;
     
-    // Initialize distances
     distances[source] = 0;
     pq.push({0, source});
     
@@ -438,30 +372,25 @@ struct bidirectional_car_dijkstra {
       
       settled.insert(current_state);
       
-      // Check if this is a target
       if (target_set.count(current_state)) {
         targets_settled++;
       }
       
-      // Find outgoing edges from current_state
       auto succ_it = legal_successors_.find(current_state);
       if (succ_it != legal_successors_.end()) {
         for (auto const& edge : succ_it->second) {
           car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
           
-          // Skip if this is the contracted node
           if (next_state.n == contracted_node.n && 
               next_state.way == contracted_node.way && 
               next_state.dir == contracted_node.dir) {
             continue;
           }
           
-          // Skip if level is too low (exclude contracted node and lower levels)
           if (get_level(next_state) <= min_level) {
             continue;
           }
           
-          // Skip if already settled
           if (settled.count(next_state)) continue;
           
           cost_t new_cost = current_cost + edge.cost;
@@ -479,7 +408,6 @@ struct bidirectional_car_dijkstra {
     return distances;
   }
 
-  // Validation functions to ensure adjacency map consistency
   static void validate_adjacency_maps() {
     std::cout << "\n=== VALIDATING ADJACENCY MAP CONSISTENCY ===\n";
     
@@ -606,13 +534,11 @@ struct bidirectional_car_dijkstra {
   }
 
   static void print_first_10_nodes_by_level() {
-    // Create a vector of states sorted by level
     std::vector<std::pair<car_state, ch_level_t>> states_by_level;
     for (auto const& [state, level] : car_state_levels_) {
       states_by_level.emplace_back(state, level);
     }
     
-    // Sort by level
     std::sort(states_by_level.begin(), states_by_level.end(), 
               [](auto const& a, auto const& b) { return a.second < b.second; });
     
@@ -737,12 +663,10 @@ private:
       std::cout << "Starting contraction of " << states_by_level.size() << " car_states...\n";
     }
     
-    // Always print the number of levels at the start
     std::cout << "Number of levels: " << states_by_level.size() << std::endl;
     
     size_t contracted = 0;
     for (auto const& [contracted_state, contracted_level] : states_by_level) {
-      // Always print the level of the currently contracted node
       std::cout << "Contracting node level: " << contracted_level << " (node " << contracted + 1 << "/" << states_by_level.size() << ")" << std::endl;
       
       contract_single_node(contracted_state, contracted_level);
@@ -793,12 +717,10 @@ private:
       }
     }
     
-    // For each incoming neighbor, run witness search to all outgoing neighbors
     for (size_t i = 0; i < incoming_neighbors.size(); ++i) {
       car_state const& v_state = incoming_neighbors[i];
       cost_t v_to_u_cost = incoming_costs[i];
       
-      // Skip self-loops  
       std::vector<car_state> targets;
       std::vector<size_t> target_indices;
       for (size_t j = 0; j < outgoing_neighbors.size(); ++j) {
@@ -818,10 +740,8 @@ private:
         max_shortcut_cost = std::max(max_shortcut_cost, static_cast<cost_t>(v_to_u_cost + outgoing_costs[j]));
       }
       
-      // Run witness search
       auto distances = local_witness_search(v_state, targets, u_level, u, max_shortcut_cost);
       
-      // Check each target and add shortcuts if needed
       for (size_t idx = 0; idx < target_indices.size(); ++idx) {
         size_t j = target_indices[idx];
         car_state const& w_state = outgoing_neighbors[j];
@@ -830,7 +750,6 @@ private:
         auto dist_it = distances.find(w_state);
         cost_t witness_cost = (dist_it != distances.end()) ? dist_it->second : kInfeasible;
         
-        // Add shortcut if witness path is more expensive or doesn't exist
         if (witness_cost > shortcut_cost) {
           // Find the incoming edge from v to u for reconstruction
           edge_transition v_to_u_edge;
@@ -867,7 +786,6 @@ public:
     cost2_.clear();
     chosen_edge_fwd_.clear();
     chosen_edge_bwd_.clear();
-     // heuristic: assume a few thousand states per small graph
     cost1_.reserve(4096);
     cost2_.reserve(4096);
     chosen_edge_fwd_.reserve(4096);
@@ -877,7 +795,6 @@ public:
     end_loc_ = end_loc;
     max_reached_1_ = false;
     max_reached_2_ = false;
-    // NOTE: Do NOT clear static adjacency maps - they persist across searches
   }
 
   template <direction SearchDir>
@@ -939,7 +856,6 @@ public:
           // Create corresponding backward edge transition (same cost, reversed source/target)
           edge_transition backward_edge{target, n, static_cast<cost_t>(cost), dist, way, to, from};
           
-          // Update all three maps simultaneously to ensure perfect symmetry
           legal_successors_[source_key].push_back(forward_edge);
           legal_incoming_[target_key].push_back(forward_edge);
           legal_predecessors_[target_key].push_back(backward_edge);
@@ -1152,13 +1068,8 @@ public:
         car_state next_state{edge.target.n_, edge.target.way_, edge.target.dir_};
         ch_level_t curr_level = get_level(curr_key);
         ch_level_t next_level = get_level(next_state);
-        //bool same_node = (next_state.n == curr_key.n);
         
-        // Forward search: only upward edges (next_level > curr_level)
-        // Backward search: only downward edges (curr_level > next_level)
-        bool level_valid = next_level > curr_level;/*(SearchDir == direction::kForward) ? 
-                          (next_level > curr_level) : 
-                          (curr_level > next_level);*/
+        bool level_valid = next_level > curr_level;
         
         if (!level_valid) {
           if constexpr (kDebugMaps) {

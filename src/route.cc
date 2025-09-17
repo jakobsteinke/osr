@@ -217,11 +217,9 @@ double add_path(ways const& w,
   return distance;
 }
 
-// Forward declarations
 bidirectional_car_dijkstra::edge_transition normalize_backward_edge(
     bidirectional_car_dijkstra::edge_transition const& edge);
 
-// Function to fully unpack shortcuts into a flat sequence of base edges
 std::vector<bidirectional_car_dijkstra::edge_transition> unpack_shortcut_to_base_edges(
     bidirectional_car_dijkstra::edge_transition const& edge, 
     bool normalize_for_backward = false) {
